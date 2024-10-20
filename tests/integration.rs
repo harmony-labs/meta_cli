@@ -9,8 +9,8 @@ fn test_meta_command_execution() {
     let meta_content = r#"
     {
         "projects": {
-            "project1": "path/to/project1",
-            "project2": "path/to/project2"
+            "project1": "project1",
+            "project2": "project2"
         },
         "ignore": [".git"]
     }
