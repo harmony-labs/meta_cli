@@ -69,7 +69,21 @@ fn test_meta_command_execution() {
     "#;
     fs::write(&meta_path, meta_content).unwrap();
 
+    let temp_dir = TempDir::new().unwrap();
+    let meta_path = temp_dir.path().join(".meta");
+    let meta_content = r#"
+    {
+        "ignore": [".git"],
+        "projects": {
+            "dir1": "./dir1",
+            "dir2": "./dir2"
+        }
+    }
+    "#;
+    fs::write(&meta_path, meta_content).unwrap();
+
     let mut cmd = Command::cargo_bin("meta").unwrap();
+    cmd.current_dir(temp_dir.path());
     cmd.current_dir(temp_dir.path());
     cmd.current_dir(temp_dir.path());
     cmd.current_dir(temp_dir.path());
