@@ -49,6 +49,7 @@ fn main() -> Result<()> {
     }
     
     // Parse the .meta file
+    let meta_file_path = meta_file_path.canonicalize().unwrap_or(meta_file_path);
     let config_str = fs::read_to_string(&meta_file_path)
         .with_context(|| format!("Failed to read config file: '{}'", meta_file_path.display()))?;
     let meta_config: Value = serde_json::from_str(&config_str)
