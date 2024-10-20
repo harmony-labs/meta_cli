@@ -25,7 +25,7 @@ fn main() -> Result<()> {
     let meta_file_path = PathBuf::from(cli.config.unwrap_or_else(|| PathBuf::from(".meta")));
     if cli.command.is_empty() {
         Cli::command().print_help()?;
-        return Ok(());
+        std::process::exit(0);
     }
     let command = cli.command.join(" ");
     
