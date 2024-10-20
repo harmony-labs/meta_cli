@@ -18,8 +18,8 @@ fn test_meta_command_execution() {
     fs::write(&meta_file_path, meta_content).unwrap();
 
     // Create the directories specified in the .meta file
-    let project1_path = temp_dir.path().join("path/to/project1");
-    let project2_path = temp_dir.path().join("path/to/project2");
+    let project1_path = temp_dir.path().join("project1");
+    let project2_path = temp_dir.path().join("project2");
     fs::create_dir_all(&project1_path).unwrap();
     fs::create_dir_all(&project2_path).unwrap();
     let mut cmd = Command::cargo_bin("meta").unwrap();
