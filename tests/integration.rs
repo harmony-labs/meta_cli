@@ -22,6 +22,7 @@ fn test_meta_command_execution() {
     let project2_path = temp_dir.path().join("path/to/project2");
     fs::create_dir_all(&project1_path).unwrap();
     fs::create_dir_all(&project2_path).unwrap();
+    let mut cmd = Command::cargo_bin("meta").unwrap();
     cmd.arg("--config")
         .arg(meta_file_path)
         .arg("echo")
