@@ -23,6 +23,10 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     
     let meta_file_path = PathBuf::from(cli.config.unwrap_or_else(|| PathBuf::from(".meta")));
+    if cli.command.is_empty() {
+        Cli::command().print_help()?;
+        return Ok(());
+    }
     let command = cli.command.join(" ");
     
     if cli.verbose {
