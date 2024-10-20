@@ -15,7 +15,7 @@ struct Cli {
     #[arg(short, long, action, help = "Enable verbose output")]
     verbose: bool,
 
-    #[arg(trailing_var_arg = true)]
+    #[arg(trailing_var_arg = true, help = "Command to execute across directories")]
     command: Vec<String>,
 }
 
