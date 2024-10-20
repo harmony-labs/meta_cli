@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, CommandFactory};
 use loop_lib::run;
 use std::path::PathBuf;
 use serde_json::Value;
