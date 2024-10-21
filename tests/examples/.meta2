@@ -1,7 +1,8 @@
 {
     "projects": {
         "project1": "project1",
-        "project2": "project2"
+        "project2": "project2",
+        "project3": "project3"
     },
     "ignore": [".git"]
 }

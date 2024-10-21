@@ -27,7 +27,7 @@ struct Cli {
     #[arg(long, help = "Execute commands in parallel")]
     parallel: bool,
 
-    #[arg(long, help = "Add shell aliases to the global .looprc file")]
+    #[arg(long, help = "Add shell aliases to the global .looprc file, enabling aliases within commands")]
     add_aliases_to_global_looprc: bool,
     command: Vec<String>,
 }
@@ -49,11 +49,16 @@ fn main() -> Result<()> {
     }
     
     // Parse the .meta file
-    let meta_file_path = meta_file_path.canonicalize().unwrap_or(meta_file_path);
-    let config_str = fs::read_to_string(&meta_file_path)
-        .with_context(|| format!("Failed to read config file: '{}'", meta_file_path.display()))?;
+    let absolute_path = std::env::current_dir()?.join(&meta_file_path);
+
+    if cli.verbose {
+        println!("\nResolved config file path: {}", absolute_path.display());
+    }
+
+    let config_str = fs::read_to_string(&absolute_path)
+        .with_context(|| format!("Failed to read meta config file: '{}'", absolute_path.display()))?;
     let meta_config: Value = serde_json::from_str(&config_str)
-        .with_context(|| format!("Failed to parse config file: {:?}", meta_file_path))?;
+        .with_context(|| format!("Failed to parse meta config file: {}", absolute_path.display()))?;
     let meta_projects = meta_config["projects"].as_object()
         .unwrap_or(&serde_json::Map::new())
         .keys()
