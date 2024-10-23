@@ -9,50 +9,50 @@ use colored::*;
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
+    #[arg(long, help = "Add shell aliases to the global .looprc file, enabling aliases within commands")]
+    add_aliases_to_global_looprc: bool,
+
+    #[arg(trailing_var_arg = true)]
+    command: Vec<String>,
+
     #[arg(short, long, value_name = "FILE")]
     config: Option<PathBuf>,
-
-    #[arg(short, long, action, help = "Enable verbose output")]
-    verbose: bool,
-
-    #[arg(short, long, help = "Specify directories to include (overrides config file)")]
-    include: Option<Vec<String>>,
 
     #[arg(short, long, help = "Specify directories to exclude (adds to config file exclusions)")]
     exclude: Option<Vec<String>>,
 
-    #[arg(short, long, help = "Enable silent mode (suppress all output)")]
-    silent: bool,
+    #[arg(short, long, help = "Specify directories to include (overrides config file)")]
+    include: Option<Vec<String>>,
 
     #[arg(long, help = "Execute commands in parallel")]
     parallel: bool,
 
-    #[arg(long, help = "Add shell aliases to the global .looprc file, enabling aliases within commands")]
-    add_aliases_to_global_looprc: bool,
-    command: Vec<String>,
+    #[arg(short, long, help = "Enable silent mode (suppress all output)")]
+    silent: bool,
+
+    #[arg(short, long, action, help = "Enable verbose output")]
+    verbose: bool,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     
     let meta_file_path = PathBuf::from(cli.config.unwrap_or_else(|| PathBuf::from(".meta")));
+
     if cli.command.is_empty() {
         Cli::command().print_help()?;
         std::process::exit(0);
     }
+
     let command = cli.command.join(" ");
-    
-    if cli.verbose {
-        println!("{}", "Verbose mode enabled".green());
-        println!("Using config file: {}", meta_file_path.display());
-        println!("Executing command: {}", command);
-    }
     
     // Parse the .meta file
     let absolute_path = std::env::current_dir()?.join(&meta_file_path);
 
     if cli.verbose {
+        println!("{}", "Verbose mode enabled".green());
         println!("\nResolved config file path: {}", absolute_path.display());
+        println!("Executing command: {}", command);
     }
 
     let config_str = fs::read_to_string(&absolute_path)
