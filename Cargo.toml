@@ -1,3 +1,7 @@
+[lib]
+name = "meta"
+path = "src/lib.rs"
+
 [package]
 name = "meta"
 version = "0.1.0"
