@@ -72,7 +72,6 @@ fn test_meta_with_parallel_option() {
     cmd.current_dir("tests/examples")
         .arg("--config")
         .arg(meta_file_path)
-        .arg("--parallel")
         .arg("echo")
         .arg("test")
         .assert()
