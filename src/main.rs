@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use clap::{Parser, CommandFactory};
 use loop_lib::run;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
+use libloading::{Library, Symbol};
 use serde_json::Value;
 use std::fs;
 use colored::*;
@@ -32,7 +34,26 @@ struct Cli {
     verbose: bool,
 }
 
+fn load_plugins(plugins_dir: &Path) -> Result<()> {
+    if plugins_dir.exists() {
+        for entry in fs::read_dir(plugins_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("so") {
+                let lib = Library::new(path)?;
+                unsafe {
+                    let func: Symbol<unsafe extern fn()> = lib.get(b"register_plugin")?;
+                    func();
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
+    let plugins_dir = PathBuf::from(".meta-plugins");
+    load_plugins(&plugins_dir)?;
     let cli = Cli::parse();
     
     let meta_file_path = PathBuf::from(cli.config.unwrap_or_else(|| PathBuf::from(".meta")));
