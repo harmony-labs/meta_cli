@@ -1,4 +1,5 @@
 use std::any::Any;
+use thiserror::Error;
 use std::collections::HashMap;
 
 #[derive(Debug, thiserror::Error)]
