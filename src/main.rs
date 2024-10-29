@@ -76,7 +76,6 @@ fn main() -> Result<()> {
             .collect::<Vec<String>>(),
         verbose: cli.verbose,
         silent: false,
-        parallel: false,
     };
 
     run(&config, &command)?;
