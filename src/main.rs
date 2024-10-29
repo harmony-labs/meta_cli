@@ -24,8 +24,6 @@ struct Cli {
     #[arg(short, long, help = "Specify directories to include (overrides config file)")]
     include: Option<Vec<String>>,
 
-    #[arg(long, help = "Execute commands in parallel")]
-    parallel: bool,
 
     #[arg(short, long, help = "Enable silent mode (suppress all output)")]
     silent: bool,
