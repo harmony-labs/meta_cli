@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, CommandFactory};
 use loop_lib::run;
-use std::fs;
 use std::path::{Path, PathBuf};
 use libloading::{Library, Symbol};
 use serde_json::Value;
@@ -40,7 +39,7 @@ fn load_plugins(plugins_dir: &Path) -> Result<()> {
             let entry = entry?;
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("so") {
-                let lib = Library::new(path)?;
+                let lib = unsafe { Library::new(path)? };
                 unsafe {
                     let func: Symbol<unsafe extern fn()> = lib.get(b"register_plugin")?;
                     func();
