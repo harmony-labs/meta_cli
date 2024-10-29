@@ -6,7 +6,8 @@ use serde_json::Value;
 use std::fs;
 use std::path::PathBuf; 
 
-use crate::plugins::PluginManager;
+mod plugins;
+use plugins::PluginManager;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
