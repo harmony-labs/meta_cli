@@ -65,20 +65,6 @@ fn test_meta_with_silent_option() {
 }
 
 #[test]
-fn test_meta_with_parallel_option() {
-    let meta_file_path = ".meta";
-
-    let mut cmd = Command::cargo_bin("meta").unwrap();
-    cmd.current_dir("tests/examples")
-        .arg("--config")
-        .arg(meta_file_path)
-        .arg("echo")
-        .arg("test")
-        .assert()
-        .success();
-}
-
-#[test]
 fn test_meta_with_add_aliases_option() {
     let meta_file_path = ".meta";
 

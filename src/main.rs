@@ -35,8 +35,6 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-    let plugins_dir = PathBuf::from(".meta-plugins");
-
     let mut plugin_manager = PluginManager::new();
     plugin_manager.load_plugins()?;
     
