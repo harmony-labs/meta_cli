@@ -1,9 +1,8 @@
 use anyhow::{Context, Result};
+use log::debug;
 use clap::{Parser, CommandFactory};
 use colored::*;
 use loop_lib::run;
-use serde_json::Value;
-use std::fs;
 use std::path::PathBuf;
 
 mod plugins;
@@ -35,6 +34,8 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
+    env_logger::init();
+
     let cli = Cli::parse();
 
     if cli.command.is_empty() {
@@ -45,7 +46,37 @@ fn main() -> Result<()> {
     let command_str = cli.command.join(" ");
 
     let meta_file_path = cli.config.unwrap_or_else(|| PathBuf::from(".meta"));
-    let absolute_path = std::env::current_dir()?.join(&meta_file_path);
+
+    let mut tried_dirs = Vec::new();
+    let mut current_dir = std::env::current_dir()?;
+    let meta_path: Option<std::path::PathBuf>;
+
+    loop {
+        let candidate = current_dir.join(&meta_file_path);
+        tried_dirs.push(candidate.clone());
+        if candidate.exists() {
+            meta_path = Some(candidate);
+            break;
+        }
+        if let Some(parent) = current_dir.parent() {
+            current_dir = parent.to_path_buf();
+        } else {
+            meta_path = None;
+            break;
+        }
+    }
+
+    let absolute_path = if let Some(path) = meta_path {
+        path
+    } else {
+        eprintln!("Error: Could not find meta config file '{}'. Tried:", meta_file_path.display());
+        for dir in &tried_dirs {
+            eprintln!("  {}", dir.display());
+        }
+        std::process::exit(1);
+    };
+
+    let meta_dir = absolute_path.parent().unwrap_or(std::path::Path::new("."));
 
     if cli.verbose {
         println!("{}", "Verbose mode enabled".green());
@@ -78,7 +109,11 @@ fn main() -> Result<()> {
 
     let (meta_projects, ignore_list) = parse_meta_config(&absolute_path)?;
     let mut projects = vec![".".to_string()];
-    projects.extend(meta_projects);
+    projects.extend(
+        meta_projects
+            .iter()
+            .map(|p| meta_dir.join(p).to_string_lossy().to_string())
+    );
 
     // Parse CLI filtering options
     let mut include_filters: Vec<String> = vec![];
@@ -117,7 +152,6 @@ fn main() -> Result<()> {
         }
     }
 
-
     let command_str = cleaned_command.join(" ");
 
     let config = loop_lib::LoopConfig {
@@ -135,15 +169,18 @@ fn main() -> Result<()> {
         && cli.command.get(1).map(|s| s == "clone").unwrap_or(false);
 
     if plugin_manager.dispatch_command(&cli.command, &projects)? {
+        log::info!("Command was handled by a plugin");
         if cli.verbose {
             println!("{}", "Command handled by plugin.".green());
         }
     } else if is_git_clone {
+        log::info!("No plugin handled git clone, skipping loop fallback");
         if cli.verbose {
             println!("{}", "No plugin handled git clone, skipping loop fallback.".yellow());
         }
         // Do nothing, plugin already handled or skipped
     } else {
+        log::info!("No plugin handled command, falling back to loop");
         if cli.verbose {
             println!("{}", "No plugin handled command, falling back to loop.".yellow());
         }
