@@ -113,6 +113,28 @@ impl PluginManager {
         if cli_command.is_empty() {
             return Ok(false);
         }
+        
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+            
+            #[test]
+            fn test_plugin_manager_new() {
+                let manager = PluginManager::new();
+                assert!(manager.plugins.is_empty());
+            }
+        
+            #[test]
+            fn test_dispatch_command_no_plugins() {
+                let manager = PluginManager::new();
+                let cli_command = vec!["dummy".to_string()];
+                let projects = vec!["proj1".to_string()];
+                let result = manager.dispatch_command(&cli_command, &projects);
+                // Should return Ok(false) meaning no plugin handled it
+                assert!(result.is_ok());
+                assert!(!result.unwrap());
+            }
+        }
 
         let command_str = cli_command.join(" ");
 
@@ -141,5 +163,71 @@ impl PluginManager {
             }
         }
         None
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use meta_plugin_api::Plugin;
+
+    struct DummyPlugin {
+        should_handle: bool,
+        fail: bool,
+    }
+
+    impl Plugin for DummyPlugin {
+        fn name(&self) -> &'static str {
+            "dummy"
+        }
+        fn commands(&self) -> Vec<&'static str> {
+            vec!["git", "git clone"]
+        }
+        fn execute(&self, _command: &str, _args: &[String]) -> anyhow::Result<()> {
+            if self.fail {
+                Err(anyhow::anyhow!("Simulated failure"))
+            } else if self.should_handle {
+                Ok(())
+            } else {
+                Err(PluginError::CommandNotFound("dummy".to_string()).into())
+            }
+        }
+    }
+
+    #[test]
+    fn test_dispatch_command_plugin_handles() {
+        let mut manager = PluginManager::new();
+        let dummy = Box::new(DummyPlugin { should_handle: true, fail: false });
+        manager.plugins.insert("dummy".to_string(), dummy);
+
+        let cli_command = vec!["git".to_string(), "clone".to_string()];
+        let projects = vec!["proj1".to_string()];
+        let result = manager.dispatch_command(&cli_command, &projects);
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+    }
+
+    #[test]
+    fn test_dispatch_command_plugin_fails() {
+        let mut manager = PluginManager::new();
+        let dummy = Box::new(DummyPlugin { should_handle: true, fail: true });
+        manager.plugins.insert("dummy".to_string(), dummy);
+
+        let cli_command = vec!["git".to_string(), "clone".to_string()];
+        let projects = vec!["proj1".to_string()];
+        let result = manager.dispatch_command(&cli_command, &projects);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_dispatch_command_no_plugin_handles() {
+        let mut manager = PluginManager::new();
+        let dummy = Box::new(DummyPlugin { should_handle: false, fail: false });
+        manager.plugins.insert("dummy".to_string(), dummy);
+
+        let cli_command = vec!["git".to_string(), "clone".to_string()];
+        let projects = vec!["proj1".to_string()];
+        let result = manager.dispatch_command(&cli_command, &projects);
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
     }
 }

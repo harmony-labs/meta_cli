@@ -3,7 +3,7 @@ name = "meta_cli"
 path = "src/lib.rs"
 
 [package]
-name = "meta_cli"
+name = "meta"
 version = "0.1.0"
 edition = "2021"
 crate-type = ["cdylib", "rlib"]

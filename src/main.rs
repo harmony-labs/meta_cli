@@ -76,17 +76,7 @@ fn main() -> Result<()> {
         }
     }
 
-    let config_str = fs::read_to_string(&absolute_path)
-        .with_context(|| format!("Failed to read meta config file: '{}'", absolute_path.display()))?;
-    let meta_config: Value = serde_json::from_str(&config_str)
-        .with_context(|| format!("Failed to parse meta config file: {}", absolute_path.display()))?;
-
-    let meta_projects = meta_config["projects"].as_object()
-        .unwrap_or(&serde_json::Map::new())
-        .keys()
-        .cloned()
-        .collect::<Vec<String>>();
-
+    let (meta_projects, ignore_list) = parse_meta_config(&absolute_path)?;
     let mut projects = vec![".".to_string()];
     projects.extend(meta_projects);
 
@@ -133,11 +123,7 @@ fn main() -> Result<()> {
     let config = loop_lib::LoopConfig {
         add_aliases_to_global_looprc: cli.add_aliases_to_global_looprc,
         directories: projects.clone(),
-        ignore: meta_config["ignore"].as_array()
-            .unwrap_or(&vec![])
-            .iter()
-            .map(|v| v.as_str().unwrap_or("").to_string())
-            .collect::<Vec<String>>(),
+        ignore: ignore_list,
         include_filters: if include_filters.is_empty() { None } else { Some(include_filters) },
         exclude_filters: if exclude_filters.is_empty() { None } else { Some(exclude_filters) },
         verbose: cli.verbose,
@@ -165,4 +151,76 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn parse_meta_config(meta_path: &std::path::Path) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+    let config_str = std::fs::read_to_string(meta_path)
+        .with_context(|| format!("Failed to read meta config file: '{}'", meta_path.display()))?;
+    let meta_config: serde_json::Value = serde_json::from_str(&config_str)
+        .with_context(|| format!("Failed to parse meta config file: {}", meta_path.display()))?;
+    let projects = meta_config["projects"].as_object()
+        .unwrap_or(&serde_json::Map::new())
+        .keys()
+        .cloned()
+        .collect::<Vec<String>>();
+    let ignore = meta_config["ignore"].as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .map(|v| v.as_str().unwrap_or("").to_string())
+        .collect::<Vec<String>>();
+    Ok((projects, ignore))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+    use std::io::Write;
+
+    #[test]
+    fn test_parse_meta_config_valid() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(
+            file,
+            r#"{{
+                "projects": {{
+                    "repo1": "./repo1",
+                    "repo2": "./repo2"
+                }},
+                "ignore": ["target", "node_modules"]
+            }}"#
+        )
+        .unwrap();
+
+        let (projects, ignore) = parse_meta_config(file.path()).unwrap();
+        assert_eq!(projects.len(), 2);
+        assert!(projects.contains(&"repo1".to_string()));
+        assert!(projects.contains(&"repo2".to_string()));
+        assert_eq!(ignore, vec!["target".to_string(), "node_modules".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_meta_config_missing_keys() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(
+            file,
+            r#"{{
+                "not_projects": {{}}
+            }}"#
+        )
+        .unwrap();
+
+        let (projects, ignore) = parse_meta_config(file.path()).unwrap();
+        assert!(projects.is_empty());
+        assert!(ignore.is_empty());
+    }
+
+    #[test]
+    fn test_parse_meta_config_invalid_json() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "invalid json").unwrap();
+
+        let result = parse_meta_config(file.path());
+        assert!(result.is_err());
+    }
 }
