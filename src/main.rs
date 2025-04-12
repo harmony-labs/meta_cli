@@ -6,6 +6,7 @@ use loop_lib::run;
 use std::path::PathBuf;
 
 mod plugins;
+use plugins::PluginOptions;
 use plugins::PluginManager;
 
 #[derive(Parser)]
@@ -85,7 +86,8 @@ fn main() -> Result<()> {
     }
 
     let mut plugin_manager = PluginManager::new();
-    plugin_manager.load_plugins()?;
+    let plugin_options = PluginOptions { verbose: cli.verbose };
+    plugin_manager.load_plugins(&plugin_options)?;
 
     // Check if help is requested
     let help_requested = cli.command.iter().any(|arg| arg == "--help" || arg == "-h");

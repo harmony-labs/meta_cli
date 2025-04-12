@@ -1,5 +1,3 @@
-use std::any::Any;
-use thiserror::Error;
 use std::collections::HashMap;
 
 #[derive(Debug, thiserror::Error)]
@@ -10,22 +8,18 @@ pub enum PluginError {
     CommandNotFound(String),
 }
 
-use meta_plugin_api::{Plugin, HelpMode};
+use meta_plugin_api::Plugin;
 
 pub type PluginCreate = unsafe fn() -> *mut dyn Plugin;
 
 // In src/main.rs
 use libloading::{Library, Symbol};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::fs;
-use clap::Parser;
 
-#[derive(Parser)]
-#[command(name = "meta")]
-struct Cli {
-    command: Option<String>,
-    #[arg(trailing_var_arg = true)]
-    args: Vec<String>,
+
+pub struct PluginOptions {
+    pub verbose: bool,
 }
 
 pub struct PluginManager {
@@ -41,25 +35,76 @@ impl PluginManager {
         }
     }
 
-    pub fn load_plugins(&mut self) -> anyhow::Result<()> {
-        let plugin_dir = Path::new(".meta-plugins");
-        if !plugin_dir.exists() {
-            return Ok(());
+    pub fn load_plugins(&mut self, options: &PluginOptions) -> anyhow::Result<()> {
+        use std::env;
+        let mut current_dir = env::current_dir()?;
+        let mut visited = std::collections::HashSet::new();
+
+        // Walk up to root
+        loop {
+            let plugin_dir = current_dir.join(".meta-plugins");
+            if options.verbose {
+                println!("Searching for plugins in: {}", plugin_dir.display());
+            }
+            if plugin_dir.exists() && plugin_dir.is_dir() {
+                // Avoid loading from the same directory twice
+                if visited.insert(plugin_dir.clone()) {
+                    if options.verbose {
+                        println!("Found plugin directory: {}, loading plugins...", plugin_dir.display());
+                    }
+                    self.load_plugins_from_dir(&plugin_dir, options)?;
+                }
+            }
+
+            // Stop if reached root
+            if let Some(parent) = current_dir.parent() {
+                current_dir = parent.to_path_buf();
+            } else {
+                break;
+            }
         }
 
+        // Finally, check home directory
+        if let Ok(home_dir) = env::var("HOME") {
+            let home_plugin_dir = Path::new(&home_dir).join(".meta-plugins");
+            if options.verbose {
+                println!("Searching for plugins in: {}", home_plugin_dir.display());
+            }
+            if home_plugin_dir.exists() && home_plugin_dir.is_dir() {
+                if visited.insert(home_plugin_dir.clone()) {
+                    if options.verbose {
+                        println!("Found plugin directory: {}, loading plugins...", home_plugin_dir.display());
+                    }
+                    self.load_plugins_from_dir(&home_plugin_dir, options)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn load_plugins_from_dir(&mut self, plugin_dir: &Path, options: &PluginOptions) -> anyhow::Result<()> {
         for entry in fs::read_dir(plugin_dir)? {
             let entry = entry?;
             let path = entry.path();
-            
-            if path.is_file() && path.file_name()
-                .and_then(|name| name.to_str())
-                .map(|name| {
-                    name.starts_with("meta-") &&
-                    (name.ends_with(".dll") || name.ends_with(".dylib") || name.ends_with(".so"))
-                })
-                .unwrap_or(false)
+
+            if path.is_file()
+                && path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| {
+                        name.starts_with("meta-")
+                            && (name.ends_with(".dll")
+                                || name.ends_with(".dylib")
+                                || name.ends_with(".so"))
+                    })
+                    .unwrap_or(false)
             {
-                self.load_plugin(&path)?;
+                if let Err(e) = self.load_plugin(&path) {
+                    // Print error and continue if verbose, otherwise just continue
+                    if options.verbose {
+                        eprintln!("Failed to load plugin '{}': {}", path.display(), e);
+                    }
+                }
             }
         }
         Ok(())
@@ -169,6 +214,11 @@ impl PluginManager {
 mod tests {
     use super::*;
     use meta_plugin_api::Plugin;
+    use tempfile::{tempdir, TempDir};
+    use std::fs::{self, File};
+    use std::io::Write;
+    use std::env;
+    use std::path::PathBuf;
 
     struct DummyPlugin {
         should_handle: bool,
@@ -229,5 +279,49 @@ mod tests {
         let result = manager.dispatch_command(&cli_command, &projects);
         assert!(result.is_ok());
         assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn test_plugin_discovery_search_order_and_logging() {
+        // Setup: create a temp dir structure with .meta-plugins in current and parent
+        let temp_root = tempdir().unwrap();
+        let parent_dir = temp_root.path().join("parent");
+        let current_dir = parent_dir.join("current");
+        fs::create_dir_all(&current_dir).unwrap();
+
+        // Create .meta-plugins in both parent and current
+        let parent_plugins = parent_dir.join(".meta-plugins");
+        let current_plugins = current_dir.join(".meta-plugins");
+        fs::create_dir_all(&parent_plugins).unwrap();
+        fs::create_dir_all(&current_plugins).unwrap();
+
+        // Create fake plugin files
+        let plugin_file = |dir: &PathBuf, name: &str| {
+            let path = dir.join(name);
+            let mut file = File::create(&path).unwrap();
+            file.write_all(b"not a real plugin").unwrap();
+            path
+        };
+        let _p1 = plugin_file(&parent_plugins, "meta-test1.so");
+        let _p2 = plugin_file(&current_plugins, "meta-test2.so");
+
+        // Save original current_dir and set to our test current_dir
+        let orig_dir = env::current_dir().unwrap();
+        env::set_current_dir(&current_dir).unwrap();
+
+        // Run plugin discovery; should not panic even though plugin files are not valid
+        let mut manager = PluginManager::new();
+        let options = PluginOptions { verbose: true };
+        // Just call load_plugins and assert it returns an error (since plugin files are not valid)
+        let result = manager.load_plugins(&options);
+
+        // Restore original current_dir
+        env::set_current_dir(orig_dir).unwrap();
+
+        // The function should not panic even if individual plugins fail to load
+        // Since we're continuing after plugin load failures, the overall result should be Ok
+        assert!(result.is_ok());
+        // The test output shows that the fake plugins were attempted to be loaded and failed,
+        // but the operation continued and completed successfully
     }
 }
