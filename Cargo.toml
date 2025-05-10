@@ -13,7 +13,7 @@ thiserror = "1.0"
 libloading = "0.7"
 anyhow = "1.0"
 clap = { version = "4.3", features = ["derive"] }
-colored = "2.0"
+colored = "3.0"
 loop_lib = { path = "../loop_lib" }
 meta_plugin_api = { path = "../meta_plugin_api" }
 rayon = "1.5"
