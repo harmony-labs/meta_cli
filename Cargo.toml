@@ -9,7 +9,7 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-thiserror = "1.0"
+thiserror = "2.0"
 libloading = "0.7"
 anyhow = "1.0"
 clap = { version = "4.3", features = ["derive"] }
