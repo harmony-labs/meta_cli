@@ -120,6 +120,7 @@ fn main() -> Result<()> {
     // Parse CLI filtering options
     let mut include_filters: Vec<String> = vec![];
     let mut exclude_filters: Vec<String> = vec![];
+    let mut parallel = false;
     let mut cleaned_command = vec![];
 
     let mut idx = 0;
@@ -147,6 +148,10 @@ fn main() -> Result<()> {
                     idx += 1;
                 }
             }
+            "--parallel" => {
+                parallel = true;
+                idx += 1;
+            }
             arg => {
                 cleaned_command.push(arg.to_string());
                 idx += 1;
@@ -164,6 +169,7 @@ fn main() -> Result<()> {
         exclude_filters: if exclude_filters.is_empty() { None } else { Some(exclude_filters) },
         verbose: cli.verbose,
         silent: cli.silent,
+        parallel,
     };
 
 
