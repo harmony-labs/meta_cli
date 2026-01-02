@@ -20,6 +20,7 @@ use std::fs;
 
 pub struct PluginOptions {
     pub verbose: bool,
+    pub json: bool,
 }
 
 pub struct PluginManager {
@@ -311,7 +312,7 @@ mod tests {
 
         // Run plugin discovery; should not panic even though plugin files are not valid
         let mut manager = PluginManager::new();
-        let options = PluginOptions { verbose: true };
+        let options = PluginOptions { verbose: true, json: false };
         // Just call load_plugins and assert it returns an error (since plugin files are not valid)
         let result = manager.load_plugins(&options);
 
