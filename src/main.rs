@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 mod plugins;
+mod registry;
 mod subprocess_plugins;
 
 use plugins::PluginOptions;
@@ -59,6 +60,11 @@ fn main() -> Result<()> {
     if cli.command.is_empty() {
         Cli::command().print_help()?;
         std::process::exit(0);
+    }
+
+    // Handle plugin management commands (don't require .meta file)
+    if cli.command.first().map(|s| s.as_str()) == Some("plugin") {
+        return handle_plugin_command(&cli.command[1..], cli.verbose, cli.json);
     }
 
     let command_str = cli.command.join(" ");
@@ -344,6 +350,93 @@ fn parse_meta_config(meta_path: &std::path::Path) -> anyhow::Result<(Vec<Project
         .collect();
 
     Ok((projects, config.ignore))
+}
+
+/// Handle plugin management subcommands
+fn handle_plugin_command(args: &[String], verbose: bool, json: bool) -> Result<()> {
+    use registry::{RegistryClient, PluginInstaller};
+
+    if args.is_empty() {
+        println!("Usage: meta plugin <command>");
+        println!();
+        println!("Commands:");
+        println!("  search <query>   Search for plugins in the registry");
+        println!("  install <name>   Install a plugin from the registry");
+        println!("  list             List installed plugins");
+        println!("  uninstall <name> Uninstall a plugin");
+        return Ok(());
+    }
+
+    let subcommand = &args[0];
+    match subcommand.as_str() {
+        "search" => {
+            if args.len() < 2 {
+                anyhow::bail!("Usage: meta plugin search <query>");
+            }
+            let query = &args[1];
+            let client = RegistryClient::new(verbose)?;
+            let results = client.search(query)?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&results)?);
+            } else if results.is_empty() {
+                println!("No plugins found matching '{}'", query);
+            } else {
+                println!("Found {} plugin(s):", results.len());
+                for plugin in results {
+                    println!("  {} v{} - {}", plugin.name, plugin.version, plugin.description);
+                    println!("    by {}", plugin.author);
+                }
+            }
+        }
+        "install" => {
+            if args.len() < 2 {
+                anyhow::bail!("Usage: meta plugin install <name>");
+            }
+            let name = &args[1];
+            let client = RegistryClient::new(verbose)?;
+            let metadata = client.fetch_plugin_metadata(name)?;
+
+            let installer = PluginInstaller::new(verbose)?;
+            installer.install(&metadata)?;
+
+            if !json {
+                println!("Successfully installed {} v{}", metadata.name, metadata.version);
+            }
+        }
+        "list" => {
+            let installer = PluginInstaller::new(verbose)?;
+            let plugins = installer.list_installed()?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&plugins)?);
+            } else if plugins.is_empty() {
+                println!("No plugins installed");
+            } else {
+                println!("Installed plugins:");
+                for plugin in plugins {
+                    println!("  {}", plugin);
+                }
+            }
+        }
+        "uninstall" => {
+            if args.len() < 2 {
+                anyhow::bail!("Usage: meta plugin uninstall <name>");
+            }
+            let name = &args[1];
+            let installer = PluginInstaller::new(verbose)?;
+            installer.uninstall(name)?;
+
+            if !json {
+                println!("Successfully uninstalled {}", name);
+            }
+        }
+        _ => {
+            anyhow::bail!("Unknown plugin command: {}. Use 'meta plugin' for help.", subcommand);
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
