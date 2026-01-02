@@ -6,7 +6,6 @@ path = "src/lib.rs"
 name = "meta"
 version = "0.1.0"
 edition = "2021"
-crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 thiserror = "1.0"

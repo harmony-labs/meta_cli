@@ -39,6 +39,7 @@ pub struct PluginRequestOptions {
 
 /// Response from a plugin after command execution
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct PluginResponse {
     pub success: bool,
     #[serde(default)]
@@ -183,6 +184,7 @@ impl SubprocessPluginManager {
     }
 
     /// Check if any plugin handles the given command
+    #[allow(dead_code)]
     pub fn handles_command(&self, command: &str) -> bool {
         let cmd_parts: Vec<&str> = command.split_whitespace().collect();
         if cmd_parts.is_empty() {
@@ -287,6 +289,7 @@ impl SubprocessPluginManager {
     }
 
     /// Get list of all available commands from all plugins
+    #[allow(dead_code)]
     pub fn available_commands(&self) -> Vec<(&str, &str)> {
         let mut commands = Vec::new();
         for plugin in self.plugins.values() {

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum PluginError {
     #[error("Failed to load plugin: {0}")]
     LoadError(String),
@@ -18,6 +19,7 @@ use std::path::Path;
 use std::fs;
 
 
+#[allow(dead_code)]
 pub struct PluginOptions {
     pub verbose: bool,
     pub json: bool,

@@ -111,6 +111,7 @@ impl RegistryClient {
     }
 
     /// Create a new registry client with custom registries
+    #[allow(dead_code)]
     pub fn with_registries(registries: Vec<String>, verbose: bool) -> Self {
         Self { registries, verbose }
     }
