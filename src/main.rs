@@ -43,6 +43,12 @@ struct Cli {
 
     #[arg(long, short = 't', value_name = "TAGS", help = "Filter projects by tag(s), comma-separated")]
     tag: Option<String>,
+
+    #[arg(long, short = 'r', help = "Recursively process nested meta repos")]
+    recursive: bool,
+
+    #[arg(long, value_name = "N", help = "Maximum depth for recursive processing (default: unlimited)")]
+    depth: Option<usize>,
 }
 
 fn main() -> Result<()> {
@@ -144,6 +150,15 @@ fn main() -> Result<()> {
             .iter()
             .map(|p| meta_dir.join(&p.path).to_string_lossy().to_string())
     );
+
+    // If recursive mode is enabled, discover nested meta repos
+    if cli.recursive {
+        let max_depth = cli.depth.unwrap_or(usize::MAX);
+        if cli.verbose {
+            println!("Recursive mode enabled, max depth: {}", if max_depth == usize::MAX { "unlimited".to_string() } else { max_depth.to_string() });
+        }
+        project_paths = discover_nested_projects(&project_paths, &cli.tag, max_depth, cli.verbose)?;
+    }
 
     // Parse CLI filtering options
     let mut include_filters: Vec<String> = vec![];
@@ -350,6 +365,71 @@ fn parse_meta_config(meta_path: &std::path::Path) -> anyhow::Result<(Vec<Project
         .collect();
 
     Ok((projects, config.ignore))
+}
+
+/// Recursively discover nested meta repos and expand project paths
+fn discover_nested_projects(
+    initial_paths: &[String],
+    tag_filter: &Option<String>,
+    max_depth: usize,
+    verbose: bool,
+) -> Result<Vec<String>> {
+    let mut all_paths: Vec<String> = Vec::new();
+    let mut to_process: Vec<(String, usize)> = initial_paths.iter().map(|p| (p.clone(), 0)).collect();
+    let mut visited = std::collections::HashSet::new();
+
+    while let Some((path, depth)) = to_process.pop() {
+        // Skip if already visited
+        if !visited.insert(path.clone()) {
+            continue;
+        }
+
+        all_paths.push(path.clone());
+
+        // Don't recurse deeper than max_depth
+        if depth >= max_depth {
+            continue;
+        }
+
+        // Check if this directory has a nested .meta file
+        let path_buf = std::path::PathBuf::from(&path);
+        if let Some((nested_config_path, _format)) = find_meta_config(&path_buf, None) {
+            // Don't process the root .meta again (it's already been processed)
+            if depth == 0 && path == "." {
+                continue;
+            }
+
+            if verbose {
+                println!("Found nested meta config: {}", nested_config_path.display());
+            }
+
+            // Parse the nested config
+            if let Ok((nested_projects, _ignore)) = parse_meta_config(&nested_config_path) {
+                let nested_dir = nested_config_path.parent().unwrap_or(std::path::Path::new("."));
+
+                // Apply tag filter if specified
+                let filtered: Vec<&ProjectInfo> = if let Some(ref tag_str) = tag_filter {
+                    let requested_tags: Vec<&str> = tag_str.split(',').map(|s| s.trim()).collect();
+                    nested_projects
+                        .iter()
+                        .filter(|p| p.tags.iter().any(|t| requested_tags.contains(&t.as_str())))
+                        .collect()
+                } else {
+                    nested_projects.iter().collect()
+                };
+
+                // Add nested projects to the processing queue
+                for project in filtered {
+                    let nested_path = nested_dir.join(&project.path).to_string_lossy().to_string();
+                    if !visited.contains(&nested_path) {
+                        to_process.push((nested_path, depth + 1));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(all_paths)
 }
 
 /// Handle plugin management subcommands
