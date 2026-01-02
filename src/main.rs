@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clap::{Parser, CommandFactory};
+use clap::{CommandFactory, Parser};
 use colored::*;
 use loop_lib::run;
 use serde::Deserialize;
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 mod registry;
 mod subprocess_plugins;
 
-use subprocess_plugins::{SubprocessPluginManager, PluginRequestOptions};
+use subprocess_plugins::{PluginRequestOptions, SubprocessPluginManager};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -38,13 +38,22 @@ struct Cli {
     #[arg(short, long, action, help = "Enable verbose output")]
     verbose: bool,
 
-    #[arg(long, short = 't', value_name = "TAGS", help = "Filter projects by tag(s), comma-separated")]
+    #[arg(
+        long,
+        short = 't',
+        value_name = "TAGS",
+        help = "Filter projects by tag(s), comma-separated"
+    )]
     tag: Option<String>,
 
     #[arg(long, short = 'r', help = "Recursively process nested meta repos")]
     recursive: bool,
 
-    #[arg(long, value_name = "N", help = "Maximum depth for recursive processing (default: unlimited)")]
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Maximum depth for recursive processing (default: unlimited)"
+    )]
     depth: Option<usize>,
 }
 
@@ -76,10 +85,12 @@ fn main() -> Result<()> {
     let absolute_path = match find_meta_config(&current_dir, cli.config.as_ref()) {
         Some((path, _format)) => path,
         None => {
-            let config_name = cli.config.as_ref()
+            let config_name = cli
+                .config
+                .as_ref()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| ".meta / .meta.yaml / .meta.yml".to_string());
-            eprintln!("Error: Could not find meta config file '{}'", config_name);
+            eprintln!("Error: Could not find meta config file '{config_name}'");
             eprintln!("Searched from {} up to root", current_dir.display());
             std::process::exit(1);
         }
@@ -90,7 +101,7 @@ fn main() -> Result<()> {
     if cli.verbose {
         println!("{}", "Verbose mode enabled".green());
         println!("Resolved config file path: {}", absolute_path.display());
-        println!("Executing command: {}", command_str);
+        println!("Executing command: {command_str}");
     }
 
     // Discover subprocess plugins
@@ -103,7 +114,7 @@ fn main() -> Result<()> {
     let filtered_projects: Vec<&ProjectInfo> = if let Some(ref tag_filter) = cli.tag {
         let requested_tags: Vec<&str> = tag_filter.split(',').map(|s| s.trim()).collect();
         if cli.verbose {
-            println!("Filtering projects by tags: {:?}", requested_tags);
+            println!("Filtering projects by tags: {requested_tags:?}");
         }
         meta_projects
             .iter()
@@ -120,14 +131,21 @@ fn main() -> Result<()> {
     project_paths.extend(
         filtered_projects
             .iter()
-            .map(|p| meta_dir.join(&p.path).to_string_lossy().to_string())
+            .map(|p| meta_dir.join(&p.path).to_string_lossy().to_string()),
     );
 
     // If recursive mode is enabled, discover nested meta repos
     if cli.recursive {
         let max_depth = cli.depth.unwrap_or(usize::MAX);
         if cli.verbose {
-            println!("Recursive mode enabled, max depth: {}", if max_depth == usize::MAX { "unlimited".to_string() } else { max_depth.to_string() });
+            println!(
+                "Recursive mode enabled, max depth: {}",
+                if max_depth == usize::MAX {
+                    "unlimited".to_string()
+                } else {
+                    max_depth.to_string()
+                }
+            );
         }
         project_paths = discover_nested_projects(&project_paths, &cli.tag, max_depth, cli.verbose)?;
     }
@@ -180,15 +198,22 @@ fn main() -> Result<()> {
         add_aliases_to_global_looprc: cli.add_aliases_to_global_looprc,
         directories: project_paths.clone(),
         ignore: ignore_list,
-        include_filters: if include_filters.is_empty() { None } else { Some(include_filters) },
-        exclude_filters: if exclude_filters.is_empty() { None } else { Some(exclude_filters) },
+        include_filters: if include_filters.is_empty() {
+            None
+        } else {
+            Some(include_filters)
+        },
+        exclude_filters: if exclude_filters.is_empty() {
+            None
+        } else {
+            Some(exclude_filters)
+        },
         verbose: cli.verbose,
         silent: cli.silent,
         parallel,
     };
 
-
-    let is_git_clone = cli.command.get(0).map(|s| s == "git").unwrap_or(false)
+    let is_git_clone = cli.command.first().map(|s| s == "git").unwrap_or(false)
         && cli.command.get(1).map(|s| s == "clone").unwrap_or(false);
 
     // Try subprocess plugins first (preferred)
@@ -198,7 +223,12 @@ fn main() -> Result<()> {
         parallel,
     };
 
-    if subprocess_plugins.execute(&command_str, &cli.command, &project_paths, subprocess_options)? {
+    if subprocess_plugins.execute(
+        &command_str,
+        &cli.command,
+        &project_paths,
+        subprocess_options,
+    )? {
         log::info!("Command was handled by subprocess plugin");
         if cli.verbose {
             println!("{}", "Command handled by subprocess plugin.".green());
@@ -206,13 +236,19 @@ fn main() -> Result<()> {
     } else if is_git_clone {
         log::info!("No plugin handled git clone, skipping loop fallback");
         if cli.verbose {
-            println!("{}", "No plugin handled git clone, skipping loop fallback.".yellow());
+            println!(
+                "{}",
+                "No plugin handled git clone, skipping loop fallback.".yellow()
+            );
         }
         // Do nothing, plugin already handled or skipped
     } else {
         log::info!("No plugin handled command, falling back to loop");
         if cli.verbose {
-            println!("{}", "No plugin handled command, falling back to loop.".yellow());
+            println!(
+                "{}",
+                "No plugin handled command, falling back to loop.".yellow()
+            );
         }
         run(&config, &command_str)?;
     }
@@ -256,13 +292,17 @@ struct MetaConfig {
 }
 
 /// Determines the format of a config file based on extension
+#[derive(Clone)]
 enum ConfigFormat {
     Json,
     Yaml,
 }
 
 /// Find the meta config file, checking for .meta, .meta.yaml, and .meta.yml
-fn find_meta_config(start_dir: &std::path::Path, config_name: Option<&PathBuf>) -> Option<(PathBuf, ConfigFormat)> {
+fn find_meta_config(
+    start_dir: &std::path::Path,
+    config_name: Option<&PathBuf>,
+) -> Option<(PathBuf, ConfigFormat)> {
     let candidates: Vec<(String, ConfigFormat)> = if let Some(name) = config_name {
         // User specified a config file name
         let name_str = name.to_string_lossy().to_string();
@@ -285,11 +325,7 @@ fn find_meta_config(start_dir: &std::path::Path, config_name: Option<&PathBuf>) 
         for (name, format) in &candidates {
             let candidate = current_dir.join(name);
             if candidate.exists() {
-                let format = match *format {
-                    ConfigFormat::Json => ConfigFormat::Json,
-                    ConfigFormat::Yaml => ConfigFormat::Yaml,
-                };
-                return Some((candidate, format));
+                return Some((candidate, format.clone()));
             }
         }
         if let Some(parent) = current_dir.parent() {
@@ -300,7 +336,9 @@ fn find_meta_config(start_dir: &std::path::Path, config_name: Option<&PathBuf>) 
     }
 }
 
-fn parse_meta_config(meta_path: &std::path::Path) -> anyhow::Result<(Vec<ProjectInfo>, Vec<String>)> {
+fn parse_meta_config(
+    meta_path: &std::path::Path,
+) -> anyhow::Result<(Vec<ProjectInfo>, Vec<String>)> {
     let config_str = std::fs::read_to_string(meta_path)
         .with_context(|| format!("Failed to read meta config file: '{}'", meta_path.display()))?;
 
@@ -326,7 +364,12 @@ fn parse_meta_config(meta_path: &std::path::Path) -> anyhow::Result<(Vec<Project
                     (repo, resolved_path, tags)
                 }
             };
-            ProjectInfo { name, path, repo, tags }
+            ProjectInfo {
+                name,
+                path,
+                repo,
+                tags,
+            }
         })
         .collect();
 
@@ -341,7 +384,8 @@ fn discover_nested_projects(
     verbose: bool,
 ) -> Result<Vec<String>> {
     let mut all_paths: Vec<String> = Vec::new();
-    let mut to_process: Vec<(String, usize)> = initial_paths.iter().map(|p| (p.clone(), 0)).collect();
+    let mut to_process: Vec<(String, usize)> =
+        initial_paths.iter().map(|p| (p.clone(), 0)).collect();
     let mut visited = std::collections::HashSet::new();
 
     while let Some((path, depth)) = to_process.pop() {
@@ -371,7 +415,9 @@ fn discover_nested_projects(
 
             // Parse the nested config
             if let Ok((nested_projects, _ignore)) = parse_meta_config(&nested_config_path) {
-                let nested_dir = nested_config_path.parent().unwrap_or(std::path::Path::new("."));
+                let nested_dir = nested_config_path
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."));
 
                 // Apply tag filter if specified
                 let filtered: Vec<&ProjectInfo> = if let Some(ref tag_str) = tag_filter {
@@ -400,7 +446,7 @@ fn discover_nested_projects(
 
 /// Handle plugin management subcommands
 fn handle_plugin_command(args: &[String], verbose: bool, json: bool) -> Result<()> {
-    use registry::{RegistryClient, PluginInstaller};
+    use registry::{PluginInstaller, RegistryClient};
 
     if args.is_empty() {
         println!("Usage: meta plugin <command>");
@@ -426,11 +472,14 @@ fn handle_plugin_command(args: &[String], verbose: bool, json: bool) -> Result<(
             if json {
                 println!("{}", serde_json::to_string_pretty(&results)?);
             } else if results.is_empty() {
-                println!("No plugins found matching '{}'", query);
+                println!("No plugins found matching '{query}'");
             } else {
                 println!("Found {} plugin(s):", results.len());
                 for plugin in results {
-                    println!("  {} v{} - {}", plugin.name, plugin.version, plugin.description);
+                    println!(
+                        "  {} v{} - {}",
+                        plugin.name, plugin.version, plugin.description
+                    );
                     println!("    by {}", plugin.author);
                 }
             }
@@ -447,7 +496,10 @@ fn handle_plugin_command(args: &[String], verbose: bool, json: bool) -> Result<(
             installer.install(&metadata)?;
 
             if !json {
-                println!("Successfully installed {} v{}", metadata.name, metadata.version);
+                println!(
+                    "Successfully installed {} v{}",
+                    metadata.name, metadata.version
+                );
             }
         }
         "list" => {
@@ -461,7 +513,7 @@ fn handle_plugin_command(args: &[String], verbose: bool, json: bool) -> Result<(
             } else {
                 println!("Installed plugins:");
                 for plugin in plugins {
-                    println!("  {}", plugin);
+                    println!("  {plugin}");
                 }
             }
         }
@@ -474,11 +526,14 @@ fn handle_plugin_command(args: &[String], verbose: bool, json: bool) -> Result<(
             installer.uninstall(name)?;
 
             if !json {
-                println!("Successfully uninstalled {}", name);
+                println!("Successfully uninstalled {name}");
             }
         }
         _ => {
-            anyhow::bail!("Unknown plugin command: {}. Use 'meta plugin' for help.", subcommand);
+            anyhow::bail!(
+                "Unknown plugin command: {}. Use 'meta plugin' for help.",
+                subcommand
+            );
         }
     }
 
@@ -488,8 +543,8 @@ fn handle_plugin_command(args: &[String], verbose: bool, json: bool) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_parse_meta_config_valid_simple_format() {
@@ -519,7 +574,10 @@ mod tests {
         assert_eq!(repo1.repo, "git@github.com:org/repo1.git");
         assert!(repo1.tags.is_empty());
 
-        assert_eq!(ignore, vec!["target".to_string(), "node_modules".to_string()]);
+        assert_eq!(
+            ignore,
+            vec!["target".to_string(), "node_modules".to_string()]
+        );
     }
 
     #[test]
@@ -592,8 +650,9 @@ projects:
 ignore:
   - node_modules
   - __pycache__
-"#
-        ).unwrap();
+"#,
+        )
+        .unwrap();
 
         let (projects, ignore) = parse_meta_config(&yaml_path).unwrap();
         assert_eq!(projects.len(), 2);
@@ -657,8 +716,9 @@ projects:
     tags:
       - ui
       - api
-"#
-        ).unwrap();
+"#,
+        )
+        .unwrap();
 
         let (projects, _ignore) = parse_meta_config(&yaml_path).unwrap();
         assert_eq!(projects.len(), 3);
@@ -695,10 +755,7 @@ projects:
         let project_dir = dir.path().join("project1");
         std::fs::create_dir(&project_dir).unwrap();
 
-        let initial_paths = vec![
-            ".".to_string(),
-            project_dir.to_string_lossy().to_string(),
-        ];
+        let initial_paths = vec![".".to_string(), project_dir.to_string_lossy().to_string()];
 
         let result = discover_nested_projects(&initial_paths, &None, usize::MAX, false).unwrap();
         assert_eq!(result.len(), 2);
@@ -723,8 +780,9 @@ projects:
         let nested_meta = project1_dir.join(".meta");
         std::fs::write(
             &nested_meta,
-            r#"{"projects": {"subproject": "git@github.com:org/subproject.git"}}"#
-        ).unwrap();
+            r#"{"projects": {"subproject": "git@github.com:org/subproject.git"}}"#,
+        )
+        .unwrap();
 
         let initial_paths = vec![
             dir.path().to_string_lossy().to_string(),
@@ -752,8 +810,9 @@ projects:
         // Create .meta at level1
         std::fs::write(
             level1.join(".meta"),
-            r#"{"projects": {"level2": "git@github.com:org/level2.git"}}"#
-        ).unwrap();
+            r#"{"projects": {"level2": "git@github.com:org/level2.git"}}"#,
+        )
+        .unwrap();
 
         let initial_paths = vec![level1.to_string_lossy().to_string()];
 
@@ -763,7 +822,7 @@ projects:
 
         // With depth 1, should include level2
         let result_depth_1 = discover_nested_projects(&initial_paths, &None, 1, false).unwrap();
-        assert!(result_depth_1.len() >= 1);
+        assert!(!result_depth_1.is_empty());
     }
 
     #[test]
@@ -790,18 +849,16 @@ projects:
                         "tags": ["api"]
                     }
                 }
-            }"#
-        ).unwrap();
+            }"#,
+        )
+        .unwrap();
 
         let initial_paths = vec![project_dir.to_string_lossy().to_string()];
 
         // Filter by "ui" tag
-        let result = discover_nested_projects(
-            &initial_paths,
-            &Some("ui".to_string()),
-            usize::MAX,
-            false
-        ).unwrap();
+        let result =
+            discover_nested_projects(&initial_paths, &Some("ui".to_string()), usize::MAX, false)
+                .unwrap();
 
         // Should include project and frontend, but not backend
         let has_frontend = result.iter().any(|p| p.contains("frontend"));
@@ -818,8 +875,9 @@ projects:
         let json_meta = dir.path().join(".meta");
         std::fs::write(
             &json_meta,
-            r#"{"projects": {"project1": "git@github.com:org/p1.git"}}"#
-        ).unwrap();
+            r#"{"projects": {"project1": "git@github.com:org/p1.git"}}"#,
+        )
+        .unwrap();
 
         let (projects, _) = parse_meta_config(&json_meta).unwrap();
         assert_eq!(projects.len(), 1);
@@ -830,8 +888,9 @@ projects:
         let yaml_meta = yaml_dir.path().join("config.yaml");
         std::fs::write(
             &yaml_meta,
-            "projects:\n  project2: git@github.com:org/p2.git\n"
-        ).unwrap();
+            "projects:\n  project2: git@github.com:org/p2.git\n",
+        )
+        .unwrap();
 
         let (yaml_projects, _) = parse_meta_config(&yaml_meta).unwrap();
         assert_eq!(yaml_projects.len(), 1);
@@ -853,8 +912,9 @@ projects:
                         "tags": ["test"]
                     }
                 }
-            }"#
-        ).unwrap();
+            }"#,
+        )
+        .unwrap();
 
         let (projects, _) = parse_meta_config(&meta_path).unwrap();
         assert_eq!(projects.len(), 1);

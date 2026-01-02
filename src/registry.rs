@@ -113,7 +113,10 @@ impl RegistryClient {
     /// Create a new registry client with custom registries
     #[allow(dead_code)]
     pub fn with_registries(registries: Vec<String>, verbose: bool) -> Self {
-        Self { registries, verbose }
+        Self {
+            registries,
+            verbose,
+        }
     }
 
     /// Fetch the registry index
@@ -121,9 +124,9 @@ impl RegistryClient {
         let mut combined_index = RegistryIndex::default();
 
         for registry_url in &self.registries {
-            let index_url = format!("{}/plugins/index.json", registry_url);
+            let index_url = format!("{registry_url}/plugins/index.json");
             if self.verbose {
-                println!("Fetching registry index from: {}", index_url);
+                println!("Fetching registry index from: {index_url}");
             }
 
             match self.fetch_json::<RegistryIndex>(&index_url) {
@@ -133,7 +136,7 @@ impl RegistryClient {
                 }
                 Err(e) => {
                     if self.verbose {
-                        eprintln!("Warning: Failed to fetch from {}: {}", registry_url, e);
+                        eprintln!("Warning: Failed to fetch from {registry_url}: {e}");
                     }
                 }
             }
@@ -145,16 +148,16 @@ impl RegistryClient {
     /// Fetch plugin metadata
     pub fn fetch_plugin_metadata(&self, name: &str) -> Result<PluginMetadata> {
         for registry_url in &self.registries {
-            let plugin_url = format!("{}/plugins/{}/plugin.json", registry_url, name);
+            let plugin_url = format!("{registry_url}/plugins/{name}/plugin.json");
             if self.verbose {
-                println!("Fetching plugin metadata from: {}", plugin_url);
+                println!("Fetching plugin metadata from: {plugin_url}");
             }
 
             match self.fetch_json::<PluginMetadata>(&plugin_url) {
                 Ok(metadata) => return Ok(metadata),
                 Err(e) => {
                     if self.verbose {
-                        eprintln!("Warning: Plugin {} not found in {}: {}", name, registry_url, e);
+                        eprintln!("Warning: Plugin {name} not found in {registry_url}: {e}");
                     }
                 }
             }
@@ -184,7 +187,7 @@ impl RegistryClient {
     fn fetch_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
         let response = ureq::get(url)
             .call()
-            .with_context(|| format!("Failed to fetch {}", url))?;
+            .with_context(|| format!("Failed to fetch {url}"))?;
 
         let body = response
             .into_string()
@@ -226,7 +229,10 @@ impl PluginInstaller {
     /// Create a new plugin installer
     pub fn new(verbose: bool) -> Result<Self> {
         let plugins_dir = Self::default_plugins_dir()?;
-        Ok(Self { plugins_dir, verbose })
+        Ok(Self {
+            plugins_dir,
+            verbose,
+        })
     }
 
     /// Get the default plugins directory
@@ -240,35 +246,50 @@ impl PluginInstaller {
         let platform = RegistryClient::current_platform();
 
         // Get the download URL for the current platform and latest version
-        let releases = metadata.releases.get(&metadata.version)
+        let releases = metadata
+            .releases
+            .get(&metadata.version)
             .with_context(|| format!("No releases found for version {}", metadata.version))?;
 
-        let download_url = self.get_platform_url(releases, platform)
-            .with_context(|| format!("No release available for platform {}", platform))?;
+        let download_url = self
+            .get_platform_url(releases, platform)
+            .with_context(|| format!("No release available for platform {platform}"))?;
 
         if self.verbose {
-            println!("Downloading {} v{} for {}", metadata.name, metadata.version, platform);
-            println!("URL: {}", download_url);
+            println!(
+                "Downloading {} v{} for {}",
+                metadata.name, metadata.version, platform
+            );
+            println!("URL: {download_url}");
         }
 
         // Create plugins directory if it doesn't exist
-        std::fs::create_dir_all(&self.plugins_dir)
-            .with_context(|| format!("Failed to create plugins directory: {}", self.plugins_dir.display()))?;
+        std::fs::create_dir_all(&self.plugins_dir).with_context(|| {
+            format!(
+                "Failed to create plugins directory: {}",
+                self.plugins_dir.display()
+            )
+        })?;
 
         // Download the archive
         let response = ureq::get(&download_url)
             .call()
-            .with_context(|| format!("Failed to download {}", download_url))?;
+            .with_context(|| format!("Failed to download {download_url}"))?;
 
         let mut bytes = Vec::new();
-        response.into_reader().read_to_end(&mut bytes)
+        response
+            .into_reader()
+            .read_to_end(&mut bytes)
             .with_context(|| "Failed to read download")?;
 
         // Extract the archive
         self.extract_archive(&bytes, &download_url, &metadata.name)?;
 
         if self.verbose {
-            println!("Successfully installed {} v{}", metadata.name, metadata.version);
+            println!(
+                "Successfully installed {} v{}",
+                metadata.name, metadata.version
+            );
         }
 
         Ok(())
@@ -288,7 +309,6 @@ impl PluginInstaller {
 
     /// Extract an archive to the plugins directory
     fn extract_archive(&self, bytes: &[u8], url: &str, _plugin_name: &str) -> Result<()> {
-
         if url.ends_with(".tar.gz") || url.ends_with(".tgz") {
             let decoder = flate2::read::GzDecoder::new(bytes);
             let mut archive = tar::Archive::new(decoder);
@@ -296,9 +316,7 @@ impl PluginInstaller {
             for entry in archive.entries()? {
                 let mut entry = entry?;
                 let path = entry.path()?;
-                let file_name = path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
+                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
                 // Only extract executables (meta-* files)
                 if file_name.starts_with("meta-") {
@@ -354,7 +372,10 @@ impl PluginInstaller {
                 let entry = entry?;
                 let path = entry.path();
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with("meta-") && !name.ends_with(".dylib") && !name.ends_with(".so") {
+                    if name.starts_with("meta-")
+                        && !name.ends_with(".dylib")
+                        && !name.ends_with(".so")
+                    {
                         plugins.push(name.to_string());
                     }
                 }
@@ -369,7 +390,7 @@ impl PluginInstaller {
         let plugin_name = if name.starts_with("meta-") {
             name.to_string()
         } else {
-            format!("meta-{}", name)
+            format!("meta-{name}")
         };
 
         let plugin_path = self.plugins_dir.join(&plugin_name);
@@ -377,7 +398,7 @@ impl PluginInstaller {
             std::fs::remove_file(&plugin_path)
                 .with_context(|| format!("Failed to remove {}", plugin_path.display()))?;
             if self.verbose {
-                println!("Uninstalled {}", plugin_name);
+                println!("Uninstalled {plugin_name}");
             }
             Ok(())
         } else {
@@ -403,7 +424,14 @@ mod tests {
         let platform = RegistryClient::current_platform();
         assert!(!platform.is_empty());
         // Platform should be one of the known values
-        let known_platforms = ["darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64", "windows-x64", "unknown"];
+        let known_platforms = [
+            "darwin-arm64",
+            "darwin-x64",
+            "linux-x64",
+            "linux-arm64",
+            "windows-x64",
+            "unknown",
+        ];
         assert!(known_platforms.contains(&platform));
     }
 
@@ -541,10 +569,8 @@ mod tests {
 
     #[test]
     fn test_registry_client_with_custom_registries() {
-        let client = RegistryClient::with_registries(
-            vec!["https://test.registry.com".to_string()],
-            false,
-        );
+        let client =
+            RegistryClient::with_registries(vec!["https://test.registry.com".to_string()], false);
 
         assert_eq!(client.registries.len(), 1);
         assert_eq!(client.registries[0], "https://test.registry.com");

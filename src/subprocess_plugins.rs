@@ -63,6 +63,12 @@ pub struct SubprocessPluginManager {
     verbose: bool,
 }
 
+impl Default for SubprocessPluginManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SubprocessPluginManager {
     pub fn new() -> Self {
         Self {
@@ -123,7 +129,11 @@ impl SubprocessPluginManager {
 
             // Look for executables named meta-*
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with("meta-") && !name.ends_with(".dylib") && !name.ends_with(".so") && !name.ends_with(".dll") {
+                if name.starts_with("meta-")
+                    && !name.ends_with(".dylib")
+                    && !name.ends_with(".so")
+                    && !name.ends_with(".dll")
+                {
                     self.try_load_plugin(&path)?;
                 }
             }
@@ -161,19 +171,29 @@ impl SubprocessPluginManager {
 
         match output {
             Ok(output) if output.status.success() => {
-                let info: PluginInfo = serde_json::from_slice(&output.stdout)
-                    .with_context(|| format!("Failed to parse plugin info from {}", path.display()))?;
+                let info: PluginInfo =
+                    serde_json::from_slice(&output.stdout).with_context(|| {
+                        format!("Failed to parse plugin info from {}", path.display())
+                    })?;
 
                 if self.verbose {
-                    println!("  Found plugin: {} v{} ({})", info.name, info.version, path.display());
+                    println!(
+                        "  Found plugin: {} v{} ({})",
+                        info.name,
+                        info.version,
+                        path.display()
+                    );
                 }
 
                 // Don't override if already loaded (first one wins)
                 if !self.plugins.contains_key(&info.name) {
-                    self.plugins.insert(info.name.clone(), SubprocessPlugin {
-                        path: path.to_path_buf(),
-                        info,
-                    });
+                    self.plugins.insert(
+                        info.name.clone(),
+                        SubprocessPlugin {
+                            path: path.to_path_buf(),
+                            info,
+                        },
+                    );
                 }
             }
             _ => {
@@ -262,13 +282,16 @@ impl SubprocessPluginManager {
         let request_json = serde_json::to_string(&request)?;
 
         if self.verbose {
-            println!("Executing plugin {} for command '{}'", plugin.info.name, command);
+            println!(
+                "Executing plugin {} for command '{}'",
+                plugin.info.name, command
+            );
         }
 
         let mut child = Command::new(&plugin.path)
             .arg("--meta-plugin-exec")
             .stdin(Stdio::piped())
-            .stdout(Stdio::inherit())  // Let plugin output directly
+            .stdout(Stdio::inherit()) // Let plugin output directly
             .stderr(Stdio::inherit())
             .spawn()
             .with_context(|| format!("Failed to execute plugin {}", plugin.path.display()))?;
