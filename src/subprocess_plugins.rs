@@ -331,4 +331,103 @@ mod tests {
         assert!(!manager.handles_command(""));
         assert!(!manager.handles_command("git status"));
     }
+
+    #[test]
+    fn test_plugin_info_serialization() {
+        let info = PluginInfo {
+            name: "test".to_string(),
+            version: "1.0.0".to_string(),
+            commands: vec!["test cmd".to_string()],
+            description: Some("A test plugin".to_string()),
+        };
+
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"name\":\"test\""));
+        assert!(json.contains("\"version\":\"1.0.0\""));
+
+        // Deserialize back
+        let parsed: PluginInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.name, "test");
+        assert_eq!(parsed.version, "1.0.0");
+        assert_eq!(parsed.commands, vec!["test cmd"]);
+    }
+
+    #[test]
+    fn test_plugin_request_serialization() {
+        let request = PluginRequest {
+            command: "git status".to_string(),
+            args: vec!["--verbose".to_string()],
+            projects: vec!["project1".to_string(), "project2".to_string()],
+            cwd: "/home/user/workspace".to_string(),
+            options: PluginRequestOptions {
+                json_output: true,
+                verbose: false,
+                parallel: true,
+            },
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"command\":\"git status\""));
+        assert!(json.contains("\"json_output\":true"));
+        assert!(json.contains("\"parallel\":true"));
+    }
+
+    #[test]
+    fn test_plugin_request_options_default() {
+        let options = PluginRequestOptions::default();
+        assert!(!options.json_output);
+        assert!(!options.verbose);
+        assert!(!options.parallel);
+    }
+
+    #[test]
+    fn test_handles_command_matching() {
+        let mut manager = SubprocessPluginManager::new();
+
+        // Manually add a plugin for testing
+        let plugin = SubprocessPlugin {
+            path: std::path::PathBuf::from("/fake/path/meta-test"),
+            info: PluginInfo {
+                name: "test".to_string(),
+                version: "1.0.0".to_string(),
+                commands: vec!["test".to_string(), "test run".to_string()],
+                description: None,
+            },
+        };
+        manager.plugins.insert("test".to_string(), plugin);
+
+        // Should match single-word command
+        assert!(manager.handles_command("test"));
+        // Should match two-word command
+        assert!(manager.handles_command("test run"));
+        // Should not match unknown command
+        assert!(!manager.handles_command("unknown"));
+    }
+
+    #[test]
+    fn test_available_commands() {
+        let mut manager = SubprocessPluginManager::new();
+
+        let plugin = SubprocessPlugin {
+            path: std::path::PathBuf::from("/fake/path/meta-git"),
+            info: PluginInfo {
+                name: "git".to_string(),
+                version: "1.0.0".to_string(),
+                commands: vec!["git status".to_string(), "git pull".to_string()],
+                description: None,
+            },
+        };
+        manager.plugins.insert("git".to_string(), plugin);
+
+        let commands = manager.available_commands();
+        assert_eq!(commands.len(), 2);
+        assert!(commands.iter().any(|(cmd, _)| *cmd == "git status"));
+        assert!(commands.iter().any(|(cmd, _)| *cmd == "git pull"));
+    }
+
+    #[test]
+    fn test_is_executable_nonexistent() {
+        let path = std::path::Path::new("/nonexistent/path/to/binary");
+        assert!(!is_executable(path));
+    }
 }

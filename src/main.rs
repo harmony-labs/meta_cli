@@ -721,4 +721,216 @@ projects:
         assert_eq!(rust_projects.len(), 1);
         assert_eq!(rust_projects[0].name, "backend");
     }
+
+    #[test]
+    fn test_discover_nested_projects_no_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create a simple project directory without nested .meta
+        let project_dir = dir.path().join("project1");
+        std::fs::create_dir(&project_dir).unwrap();
+
+        let initial_paths = vec![
+            ".".to_string(),
+            project_dir.to_string_lossy().to_string(),
+        ];
+
+        let result = discover_nested_projects(&initial_paths, &None, usize::MAX, false).unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_discover_nested_projects_with_nested() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create nested structure:
+        // root/
+        //   .meta (contains project1)
+        //   project1/
+        //     .meta (contains subproject)
+        //     subproject/
+
+        let project1_dir = dir.path().join("project1");
+        let subproject_dir = project1_dir.join("subproject");
+        std::fs::create_dir_all(&subproject_dir).unwrap();
+
+        // Create nested .meta in project1
+        let nested_meta = project1_dir.join(".meta");
+        std::fs::write(
+            &nested_meta,
+            r#"{"projects": {"subproject": "git@github.com:org/subproject.git"}}"#
+        ).unwrap();
+
+        let initial_paths = vec![
+            dir.path().to_string_lossy().to_string(),
+            project1_dir.to_string_lossy().to_string(),
+        ];
+
+        let result = discover_nested_projects(&initial_paths, &None, usize::MAX, false).unwrap();
+
+        // Should include root, project1, and subproject
+        assert!(result.len() >= 2);
+        // Check that subproject was discovered
+        let has_subproject = result.iter().any(|p| p.contains("subproject"));
+        assert!(has_subproject, "Nested subproject should be discovered");
+    }
+
+    #[test]
+    fn test_discover_nested_projects_with_depth_limit() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create deeply nested structure
+        let level1 = dir.path().join("level1");
+        let level2 = level1.join("level2");
+        std::fs::create_dir_all(&level2).unwrap();
+
+        // Create .meta at level1
+        std::fs::write(
+            level1.join(".meta"),
+            r#"{"projects": {"level2": "git@github.com:org/level2.git"}}"#
+        ).unwrap();
+
+        let initial_paths = vec![level1.to_string_lossy().to_string()];
+
+        // With depth 0, should not recurse into level2
+        let result_depth_0 = discover_nested_projects(&initial_paths, &None, 0, false).unwrap();
+        assert_eq!(result_depth_0.len(), 1); // Only level1
+
+        // With depth 1, should include level2
+        let result_depth_1 = discover_nested_projects(&initial_paths, &None, 1, false).unwrap();
+        assert!(result_depth_1.len() >= 1);
+    }
+
+    #[test]
+    fn test_discover_nested_projects_with_tag_filter() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let project_dir = dir.path().join("project");
+        let frontend_dir = project_dir.join("frontend");
+        let backend_dir = project_dir.join("backend");
+        std::fs::create_dir_all(&frontend_dir).unwrap();
+        std::fs::create_dir_all(&backend_dir).unwrap();
+
+        // Create .meta with tagged projects
+        std::fs::write(
+            project_dir.join(".meta"),
+            r#"{
+                "projects": {
+                    "frontend": {
+                        "repo": "git@github.com:org/frontend.git",
+                        "tags": ["ui"]
+                    },
+                    "backend": {
+                        "repo": "git@github.com:org/backend.git",
+                        "tags": ["api"]
+                    }
+                }
+            }"#
+        ).unwrap();
+
+        let initial_paths = vec![project_dir.to_string_lossy().to_string()];
+
+        // Filter by "ui" tag
+        let result = discover_nested_projects(
+            &initial_paths,
+            &Some("ui".to_string()),
+            usize::MAX,
+            false
+        ).unwrap();
+
+        // Should include project and frontend, but not backend
+        let has_frontend = result.iter().any(|p| p.contains("frontend"));
+        let has_backend = result.iter().any(|p| p.contains("backend"));
+        assert!(has_frontend, "Frontend should be included (has 'ui' tag)");
+        assert!(!has_backend, "Backend should be excluded (no 'ui' tag)");
+    }
+
+    #[test]
+    fn test_mixed_json_yaml_format() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Test that we can parse both JSON and YAML in different locations
+        let json_meta = dir.path().join(".meta");
+        std::fs::write(
+            &json_meta,
+            r#"{"projects": {"project1": "git@github.com:org/p1.git"}}"#
+        ).unwrap();
+
+        let (projects, _) = parse_meta_config(&json_meta).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "project1");
+
+        // YAML version
+        let yaml_dir = tempfile::tempdir().unwrap();
+        let yaml_meta = yaml_dir.path().join("config.yaml");
+        std::fs::write(
+            &yaml_meta,
+            "projects:\n  project2: git@github.com:org/p2.git\n"
+        ).unwrap();
+
+        let (yaml_projects, _) = parse_meta_config(&yaml_meta).unwrap();
+        assert_eq!(yaml_projects.len(), 1);
+        assert_eq!(yaml_projects[0].name, "project2");
+    }
+
+    #[test]
+    fn test_extended_format_with_optional_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta_path = dir.path().join(".meta");
+
+        // Extended format without explicit path (should default to project name)
+        std::fs::write(
+            &meta_path,
+            r#"{
+                "projects": {
+                    "myproject": {
+                        "repo": "git@github.com:org/myproject.git",
+                        "tags": ["test"]
+                    }
+                }
+            }"#
+        ).unwrap();
+
+        let (projects, _) = parse_meta_config(&meta_path).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "myproject");
+        assert_eq!(projects[0].path, "myproject"); // Path defaults to name
+        assert_eq!(projects[0].tags, vec!["test"]);
+    }
+
+    #[test]
+    fn test_find_meta_config_walks_up_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a").join("b").join("c");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        // Create .meta at root
+        let meta_path = dir.path().join(".meta");
+        std::fs::write(&meta_path, r#"{"projects": {}}"#).unwrap();
+
+        // Search from nested directory should find root .meta
+        let result = find_meta_config(&nested, None);
+        assert!(result.is_some());
+        let (found_path, _) = result.unwrap();
+        assert_eq!(found_path, meta_path);
+    }
+
+    #[test]
+    fn test_yaml_file_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Test .yaml extension
+        let yaml_path = dir.path().join(".meta.yaml");
+        std::fs::write(&yaml_path, "projects:\n  p1: git@test.git\n").unwrap();
+
+        let result = find_meta_config(dir.path(), None);
+        assert!(result.is_some());
+
+        // Clean up and test .yml extension
+        std::fs::remove_file(&yaml_path).unwrap();
+        let yml_path = dir.path().join(".meta.yml");
+        std::fs::write(&yml_path, "projects:\n  p2: git@test.git\n").unwrap();
+
+        let result = find_meta_config(dir.path(), None);
+        assert!(result.is_some());
+    }
 }

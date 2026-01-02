@@ -405,4 +405,147 @@ mod tests {
         let known_platforms = ["darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64", "windows-x64", "unknown"];
         assert!(known_platforms.contains(&platform));
     }
+
+    #[test]
+    fn test_plugin_metadata_serialization() {
+        let metadata = PluginMetadata {
+            name: "docker".to_string(),
+            description: "Docker commands for meta".to_string(),
+            version: "1.0.0".to_string(),
+            author: "testuser".to_string(),
+            repository: "github.com/testuser/meta-plugin-docker".to_string(),
+            releases: HashMap::new(),
+            checksum: Some("sha256:abc123".to_string()),
+        };
+
+        let json = serde_json::to_string(&metadata).unwrap();
+        assert!(json.contains("\"name\":\"docker\""));
+        assert!(json.contains("\"version\":\"1.0.0\""));
+
+        // Deserialize
+        let parsed: PluginMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.name, "docker");
+        assert_eq!(parsed.author, "testuser");
+    }
+
+    #[test]
+    fn test_platform_releases_serialization() {
+        let releases = PlatformReleases {
+            darwin_arm64: Some("https://example.com/darwin-arm64.tar.gz".to_string()),
+            darwin_x64: Some("https://example.com/darwin-x64.tar.gz".to_string()),
+            linux_x64: Some("https://example.com/linux-x64.tar.gz".to_string()),
+            linux_arm64: None,
+            windows_x64: None,
+        };
+
+        let json = serde_json::to_string(&releases).unwrap();
+        assert!(json.contains("darwin-arm64"));
+        assert!(json.contains("darwin-x64"));
+    }
+
+    #[test]
+    fn test_registry_index_entry_serialization() {
+        let entry = PluginIndexEntry {
+            name: "npm".to_string(),
+            description: "NPM commands for meta".to_string(),
+            version: "2.0.0".to_string(),
+            author: "npmuser".to_string(),
+        };
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: PluginIndexEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.name, "npm");
+        assert_eq!(parsed.version, "2.0.0");
+    }
+
+    #[test]
+    fn test_registry_config_custom_registries() {
+        let config = RegistryConfig {
+            registries: vec![
+                "https://custom.registry.com".to_string(),
+                "https://another.registry.com".to_string(),
+            ],
+        };
+
+        let registries = config.get_registries();
+        assert_eq!(registries.len(), 2);
+        assert_eq!(registries[0], "https://custom.registry.com");
+        assert_eq!(registries[1], "https://another.registry.com");
+    }
+
+    #[test]
+    fn test_plugin_installer_list_installed_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = PluginInstaller {
+            plugins_dir: dir.path().to_path_buf(),
+            verbose: false,
+        };
+
+        let plugins = installer.list_installed().unwrap();
+        assert!(plugins.is_empty());
+    }
+
+    #[test]
+    fn test_plugin_installer_list_installed_with_plugins() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create some fake plugin files
+        std::fs::write(dir.path().join("meta-docker"), "fake binary").unwrap();
+        std::fs::write(dir.path().join("meta-npm"), "fake binary").unwrap();
+        std::fs::write(dir.path().join("other-file"), "not a plugin").unwrap();
+        std::fs::write(dir.path().join("meta-old.dylib"), "dylib file").unwrap();
+
+        let installer = PluginInstaller {
+            plugins_dir: dir.path().to_path_buf(),
+            verbose: false,
+        };
+
+        let plugins = installer.list_installed().unwrap();
+        assert_eq!(plugins.len(), 2);
+        assert!(plugins.contains(&"meta-docker".to_string()));
+        assert!(plugins.contains(&"meta-npm".to_string()));
+        // Should not include non-meta files or dylibs
+        assert!(!plugins.contains(&"other-file".to_string()));
+        assert!(!plugins.contains(&"meta-old.dylib".to_string()));
+    }
+
+    #[test]
+    fn test_plugin_installer_uninstall() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("meta-test"), "fake binary").unwrap();
+
+        let installer = PluginInstaller {
+            plugins_dir: dir.path().to_path_buf(),
+            verbose: false,
+        };
+
+        // Uninstall should succeed
+        installer.uninstall("test").unwrap();
+        assert!(!dir.path().join("meta-test").exists());
+    }
+
+    #[test]
+    fn test_plugin_installer_uninstall_not_installed() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let installer = PluginInstaller {
+            plugins_dir: dir.path().to_path_buf(),
+            verbose: false,
+        };
+
+        // Uninstall should fail for non-existent plugin
+        let result = installer.uninstall("nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_registry_client_with_custom_registries() {
+        let client = RegistryClient::with_registries(
+            vec!["https://test.registry.com".to_string()],
+            false,
+        );
+
+        assert_eq!(client.registries.len(), 1);
+        assert_eq!(client.registries[0], "https://test.registry.com");
+    }
 }
