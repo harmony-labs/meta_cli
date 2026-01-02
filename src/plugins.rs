@@ -161,28 +161,6 @@ impl PluginManager {
         if cli_command.is_empty() {
             return Ok(false);
         }
-        
-        #[cfg(test)]
-        mod tests {
-            use super::*;
-            
-            #[test]
-            fn test_plugin_manager_new() {
-                let manager = PluginManager::new();
-                assert!(manager.plugins.is_empty());
-            }
-        
-            #[test]
-            fn test_dispatch_command_no_plugins() {
-                let manager = PluginManager::new();
-                let cli_command = vec!["dummy".to_string()];
-                let projects = vec!["proj1".to_string()];
-                let result = manager.dispatch_command(&cli_command, &projects);
-                // Should return Ok(false) meaning no plugin handled it
-                assert!(result.is_ok());
-                assert!(!result.unwrap());
-            }
-        }
 
         let command_str = cli_command.join(" ");
 
@@ -217,7 +195,7 @@ impl PluginManager {
 mod tests {
     use super::*;
     use meta_plugin_api::Plugin;
-    use tempfile::{tempdir, TempDir};
+    use tempfile::tempdir;
     use std::fs::{self, File};
     use std::io::Write;
     use std::env;
