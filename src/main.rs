@@ -6,12 +6,9 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-mod plugins;
 mod registry;
 mod subprocess_plugins;
 
-use plugins::PluginOptions;
-use plugins::PluginManager;
 use subprocess_plugins::{SubprocessPluginManager, PluginRequestOptions};
 
 #[derive(Parser)]
@@ -96,34 +93,9 @@ fn main() -> Result<()> {
         println!("Executing command: {}", command_str);
     }
 
-    // Discover subprocess plugins (preferred)
+    // Discover subprocess plugins
     let mut subprocess_plugins = SubprocessPluginManager::new();
     subprocess_plugins.discover_plugins(cli.verbose)?;
-
-    // Also load legacy dylib plugins for backward compatibility
-    let mut plugin_manager = PluginManager::new();
-    let plugin_options = PluginOptions { verbose: cli.verbose, json: cli.json };
-    plugin_manager.load_plugins(&plugin_options)?;
-
-    // Check if help is requested
-    let help_requested = cli.command.iter().any(|arg| arg == "--help" || arg == "-h");
-    if help_requested {
-        if let Some((mode, plugin_help)) = plugin_manager.get_plugin_help_output(&cli.command) {
-            match mode {
-                meta_plugin_api::HelpMode::Override => {
-                    println!("{}", plugin_help);
-                    std::process::exit(0);
-                }
-                meta_plugin_api::HelpMode::Prepend => {
-                    println!("{}", plugin_help);
-                    // Fall through to show system help as well
-                }
-                meta_plugin_api::HelpMode::None => {
-                    // Fall through to show system help only
-                }
-            }
-        }
-    }
 
     let (meta_projects, ignore_list) = parse_meta_config(&absolute_path)?;
 
@@ -230,12 +202,6 @@ fn main() -> Result<()> {
         log::info!("Command was handled by subprocess plugin");
         if cli.verbose {
             println!("{}", "Command handled by subprocess plugin.".green());
-        }
-    } else if plugin_manager.dispatch_command(&cli.command, &project_paths)? {
-        // Fall back to legacy dylib plugins
-        log::info!("Command was handled by dylib plugin");
-        if cli.verbose {
-            println!("{}", "Command handled by dylib plugin.".green());
         }
     } else if is_git_clone {
         log::info!("No plugin handled git clone, skipping loop fallback");
