@@ -69,9 +69,26 @@ fn main() -> Result<()> {
     }
     log::debug!("cli.json = {}", cli.json);
 
+    // Discover plugins early to handle --help requests and plugin listing
+    let mut subprocess_plugins = SubprocessPluginManager::new();
+    subprocess_plugins.discover_plugins(cli.verbose)?;
+
     if cli.command.is_empty() {
         Cli::command().print_help()?;
+        print_installed_plugins(&subprocess_plugins);
         std::process::exit(0);
+    }
+
+    // Check if user wants plugin help (e.g., "meta git --help" or "meta git -h")
+    if let Some(first_arg) = cli.command.first() {
+        let wants_help = cli.command.iter().any(|arg| arg == "--help" || arg == "-h");
+        if wants_help {
+            // Check if this is a plugin command
+            if let Some(help_text) = subprocess_plugins.get_plugin_help(first_arg) {
+                println!("{help_text}");
+                return Ok(());
+            }
+        }
     }
 
     // Handle plugin management commands (don't require .meta file)
@@ -103,10 +120,6 @@ fn main() -> Result<()> {
         println!("Resolved config file path: {}", absolute_path.display());
         println!("Executing command: {command_str}");
     }
-
-    // Discover subprocess plugins
-    let mut subprocess_plugins = SubprocessPluginManager::new();
-    subprocess_plugins.discover_plugins(cli.verbose)?;
 
     let (meta_projects, ignore_list) = parse_meta_config(&absolute_path)?;
 
@@ -538,6 +551,20 @@ fn handle_plugin_command(args: &[String], verbose: bool, json: bool) -> Result<(
     }
 
     Ok(())
+}
+
+/// Print list of installed plugins for --help output
+fn print_installed_plugins(plugins: &SubprocessPluginManager) {
+    let plugin_list = plugins.list_plugins();
+    if !plugin_list.is_empty() {
+        println!();
+        println!("INSTALLED PLUGINS:");
+        for (name, version, description) in plugin_list {
+            println!("    {name:<12} v{version:<8} {description}");
+        }
+        println!();
+        println!("Run 'meta <plugin> --help' for plugin-specific help.");
+    }
 }
 
 #[cfg(test)]

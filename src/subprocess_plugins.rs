@@ -17,6 +17,25 @@ pub struct PluginInfo {
     pub commands: Vec<String>,
     #[serde(default)]
     pub description: Option<String>,
+    /// Help information for the plugin (optional - for backward compatibility)
+    #[serde(default)]
+    pub help: Option<PluginHelp>,
+}
+
+/// Help information for a plugin
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginHelp {
+    /// Usage string (e.g., "meta git <command> [args...]")
+    pub usage: String,
+    /// Command descriptions (command name -> description)
+    #[serde(default)]
+    pub commands: std::collections::HashMap<String, String>,
+    /// Example usage strings
+    #[serde(default)]
+    pub examples: Vec<String>,
+    /// Additional note (e.g., how to run raw commands)
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// Request sent to a plugin for command execution
@@ -322,6 +341,128 @@ impl SubprocessPluginManager {
         }
         commands
     }
+
+    /// Get a plugin by name
+    #[allow(dead_code)]
+    pub fn get_plugin(&self, name: &str) -> Option<&SubprocessPlugin> {
+        self.plugins.get(name)
+    }
+
+    /// Get a plugin that handles a specific command (e.g., "git" for "git status")
+    #[allow(dead_code)]
+    pub fn get_plugin_for_command(&self, command: &str) -> Option<&SubprocessPlugin> {
+        let cmd_parts: Vec<&str> = command.split_whitespace().collect();
+        if cmd_parts.is_empty() {
+            return None;
+        }
+
+        // First word is likely the plugin name
+        let plugin_name = cmd_parts[0];
+        self.plugins.get(plugin_name)
+    }
+
+    /// Get list of all plugins with their descriptions
+    pub fn list_plugins(&self) -> Vec<(&str, &str, &str)> {
+        let mut plugins: Vec<_> = self
+            .plugins
+            .values()
+            .map(|p| {
+                (
+                    p.info.name.as_str(),
+                    p.info.version.as_str(),
+                    p.info
+                        .description
+                        .as_deref()
+                        .unwrap_or("No description available"),
+                )
+            })
+            .collect();
+        plugins.sort_by(|a, b| a.0.cmp(b.0));
+        plugins
+    }
+
+    /// Get help text for a specific plugin
+    pub fn get_plugin_help(&self, plugin_name: &str) -> Option<String> {
+        let plugin = self.plugins.get(plugin_name)?;
+
+        // Try to get help by executing plugin with --help
+        let output = Command::new(&plugin.path)
+            .arg("--help")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output();
+
+        if let Ok(output) = output {
+            if output.status.success() {
+                return Some(String::from_utf8_lossy(&output.stdout).to_string());
+            }
+        }
+
+        // Fall back to generating help from plugin info
+        Some(self.generate_fallback_help(plugin))
+    }
+
+    /// Generate help text from PluginInfo when plugin doesn't support --help
+    fn generate_fallback_help(&self, plugin: &SubprocessPlugin) -> String {
+        let info = &plugin.info;
+        let mut help = String::new();
+        let name = &info.name;
+        let version = &info.version;
+        let description = info.description.as_deref().unwrap_or("Meta CLI plugin");
+
+        // Header
+        help.push_str(&format!("meta-{name} v{version} - {description}\n\n"));
+
+        // If plugin has structured help, use it
+        if let Some(ref plugin_help) = info.help {
+            help.push_str("USAGE:\n");
+            let usage = &plugin_help.usage;
+            help.push_str(&format!("    {usage}\n\n"));
+
+            if !plugin_help.commands.is_empty() {
+                help.push_str("COMMANDS:\n");
+                let mut cmds: Vec<_> = plugin_help.commands.iter().collect();
+                cmds.sort_by(|a, b| a.0.cmp(b.0));
+                for (cmd, desc) in cmds {
+                    help.push_str(&format!("    {cmd:<16} {desc}\n"));
+                }
+                help.push('\n');
+            }
+
+            if !plugin_help.examples.is_empty() {
+                help.push_str("EXAMPLES:\n");
+                for example in &plugin_help.examples {
+                    help.push_str(&format!("    {example}\n"));
+                }
+                help.push('\n');
+            }
+
+            if let Some(ref note) = plugin_help.note {
+                help.push_str(&format!("NOTE:\n    {note}\n"));
+            }
+        } else {
+            // Basic fallback from command list
+            help.push_str("USAGE:\n");
+            help.push_str(&format!("    meta {name} <command> [args...]\n\n"));
+
+            if !info.commands.is_empty() {
+                help.push_str("COMMANDS:\n");
+                let prefix = format!("{name} ");
+                for cmd in &info.commands {
+                    // Strip "git " prefix for display
+                    let display_cmd = cmd.strip_prefix(&prefix).unwrap_or(cmd);
+                    help.push_str(&format!("    {display_cmd}\n"));
+                }
+                help.push('\n');
+            }
+
+            help.push_str(&format!(
+                "NOTE:\n    To run raw {name} commands: meta exec -- {name} <command>\n"
+            ));
+        }
+
+        help
+    }
 }
 
 /// Check if a file is executable
@@ -365,6 +506,7 @@ mod tests {
             version: "1.0.0".to_string(),
             commands: vec!["test cmd".to_string()],
             description: Some("A test plugin".to_string()),
+            help: None,
         };
 
         let json = serde_json::to_string(&info).unwrap();
@@ -418,6 +560,7 @@ mod tests {
                 version: "1.0.0".to_string(),
                 commands: vec!["test".to_string(), "test run".to_string()],
                 description: None,
+                help: None,
             },
         };
         manager.plugins.insert("test".to_string(), plugin);
@@ -441,6 +584,7 @@ mod tests {
                 version: "1.0.0".to_string(),
                 commands: vec!["git status".to_string(), "git pull".to_string()],
                 description: None,
+                help: None,
             },
         };
         manager.plugins.insert("git".to_string(), plugin);
@@ -455,5 +599,165 @@ mod tests {
     fn test_is_executable_nonexistent() {
         let path = std::path::Path::new("/nonexistent/path/to/binary");
         assert!(!is_executable(path));
+    }
+
+    #[test]
+    fn test_generate_fallback_help_without_structured_help() {
+        let manager = SubprocessPluginManager::new();
+        let plugin = SubprocessPlugin {
+            path: std::path::PathBuf::from("/fake/path/meta-test"),
+            info: PluginInfo {
+                name: "test".to_string(),
+                version: "1.0.0".to_string(),
+                commands: vec!["test run".to_string(), "test check".to_string()],
+                description: Some("A test plugin".to_string()),
+                help: None,
+            },
+        };
+
+        let help = manager.generate_fallback_help(&plugin);
+        assert!(help.contains("meta-test v1.0.0"));
+        assert!(help.contains("A test plugin"));
+        assert!(help.contains("USAGE:"));
+        assert!(help.contains("meta test <command>"));
+        assert!(help.contains("COMMANDS:"));
+        assert!(help.contains("run"));
+        assert!(help.contains("check"));
+        assert!(help.contains("NOTE:"));
+        assert!(help.contains("meta exec -- test"));
+    }
+
+    #[test]
+    fn test_generate_fallback_help_with_structured_help() {
+        let manager = SubprocessPluginManager::new();
+        let mut commands = std::collections::HashMap::new();
+        commands.insert("build".to_string(), "Build the project".to_string());
+        commands.insert("test".to_string(), "Run tests".to_string());
+
+        let plugin = SubprocessPlugin {
+            path: std::path::PathBuf::from("/fake/path/meta-rust"),
+            info: PluginInfo {
+                name: "rust".to_string(),
+                version: "2.0.0".to_string(),
+                commands: vec!["rust build".to_string()],
+                description: Some("Rust plugin".to_string()),
+                help: Some(PluginHelp {
+                    usage: "meta rust <command> [args...]".to_string(),
+                    commands,
+                    examples: vec![
+                        "meta rust build".to_string(),
+                        "meta rust test --all".to_string(),
+                    ],
+                    note: Some("Custom note here".to_string()),
+                }),
+            },
+        };
+
+        let help = manager.generate_fallback_help(&plugin);
+        assert!(help.contains("meta-rust v2.0.0"));
+        assert!(help.contains("Rust plugin"));
+        assert!(help.contains("USAGE:"));
+        assert!(help.contains("meta rust <command> [args...]"));
+        assert!(help.contains("COMMANDS:"));
+        assert!(help.contains("build"));
+        assert!(help.contains("Build the project"));
+        assert!(help.contains("test"));
+        assert!(help.contains("Run tests"));
+        assert!(help.contains("EXAMPLES:"));
+        assert!(help.contains("meta rust build"));
+        assert!(help.contains("meta rust test --all"));
+        assert!(help.contains("NOTE:"));
+        assert!(help.contains("Custom note here"));
+    }
+
+    #[test]
+    fn test_generate_fallback_help_no_description() {
+        let manager = SubprocessPluginManager::new();
+        let plugin = SubprocessPlugin {
+            path: std::path::PathBuf::from("/fake/path/meta-simple"),
+            info: PluginInfo {
+                name: "simple".to_string(),
+                version: "0.1.0".to_string(),
+                commands: vec![],
+                description: None,
+                help: None,
+            },
+        };
+
+        let help = manager.generate_fallback_help(&plugin);
+        assert!(help.contains("meta-simple v0.1.0"));
+        assert!(help.contains("Meta CLI plugin")); // Default description
+    }
+
+    #[test]
+    fn test_list_plugins_sorted() {
+        let mut manager = SubprocessPluginManager::new();
+
+        // Add plugins in non-alphabetical order
+        manager.plugins.insert(
+            "zebra".to_string(),
+            SubprocessPlugin {
+                path: std::path::PathBuf::from("/fake/meta-zebra"),
+                info: PluginInfo {
+                    name: "zebra".to_string(),
+                    version: "1.0.0".to_string(),
+                    commands: vec![],
+                    description: Some("Z plugin".to_string()),
+                    help: None,
+                },
+            },
+        );
+        manager.plugins.insert(
+            "alpha".to_string(),
+            SubprocessPlugin {
+                path: std::path::PathBuf::from("/fake/meta-alpha"),
+                info: PluginInfo {
+                    name: "alpha".to_string(),
+                    version: "2.0.0".to_string(),
+                    commands: vec![],
+                    description: Some("A plugin".to_string()),
+                    help: None,
+                },
+            },
+        );
+
+        let plugins = manager.list_plugins();
+        assert_eq!(plugins.len(), 2);
+        assert_eq!(plugins[0].0, "alpha"); // Should be sorted alphabetically
+        assert_eq!(plugins[1].0, "zebra");
+    }
+
+    #[test]
+    fn test_plugin_help_serialization() {
+        let mut commands = std::collections::HashMap::new();
+        commands.insert("cmd1".to_string(), "Description 1".to_string());
+
+        let help = PluginHelp {
+            usage: "test usage".to_string(),
+            commands,
+            examples: vec!["example 1".to_string()],
+            note: Some("a note".to_string()),
+        };
+
+        let json = serde_json::to_string(&help).unwrap();
+        assert!(json.contains("\"usage\":\"test usage\""));
+        assert!(json.contains("\"examples\":[\"example 1\"]"));
+
+        // Deserialize back
+        let parsed: PluginHelp = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.usage, "test usage");
+        assert_eq!(parsed.examples, vec!["example 1"]);
+        assert_eq!(parsed.note, Some("a note".to_string()));
+    }
+
+    #[test]
+    fn test_plugin_help_deserialization_with_defaults() {
+        // Test that missing optional fields use defaults
+        let json = r#"{"usage": "test"}"#;
+        let help: PluginHelp = serde_json::from_str(json).unwrap();
+        assert_eq!(help.usage, "test");
+        assert!(help.commands.is_empty());
+        assert!(help.examples.is_empty());
+        assert!(help.note.is_none());
     }
 }
