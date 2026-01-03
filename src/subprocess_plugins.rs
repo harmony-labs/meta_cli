@@ -49,24 +49,40 @@ pub struct PluginRequest {
     pub options: PluginRequestOptions,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, Clone)]
 pub struct PluginRequestOptions {
     pub json_output: bool,
     pub verbose: bool,
     pub parallel: bool,
+    pub dry_run: bool,
+    pub silent: bool,
+    pub include_filters: Option<Vec<String>>,
+    pub exclude_filters: Option<Vec<String>>,
 }
 
-/// Response from a plugin after command execution
+/// Response from a plugin - an execution plan for the shim to execute via loop_lib
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct PluginResponse {
-    pub success: bool,
+    pub plan: ExecutionPlan,
+}
+
+/// An execution plan returned by a plugin
+#[derive(Debug, Deserialize)]
+pub struct ExecutionPlan {
+    /// List of commands to execute
+    pub commands: Vec<PlannedCommand>,
+    /// Whether to run commands in parallel (overrides CLI --parallel if set)
     #[serde(default)]
-    pub exit_code: i32,
-    #[serde(default)]
-    pub output: Option<String>,
-    #[serde(default)]
-    pub error: Option<String>,
+    pub parallel: Option<bool>,
+}
+
+/// A single command in an execution plan
+#[derive(Debug, Deserialize)]
+pub struct PlannedCommand {
+    /// Directory to execute in (relative to meta root or absolute)
+    pub dir: String,
+    /// Command to execute
+    pub cmd: String,
 }
 
 /// A discovered subprocess plugin
@@ -291,11 +307,7 @@ impl SubprocessPluginManager {
             args: args.to_vec(),
             projects: projects.to_vec(),
             cwd: std::env::current_dir()?.to_string_lossy().to_string(),
-            options: PluginRequestOptions {
-                json_output: options.json_output,
-                verbose: options.verbose,
-                parallel: options.parallel,
-            },
+            options: options.clone(),
         };
 
         let request_json = serde_json::to_string(&request)?;
@@ -310,8 +322,8 @@ impl SubprocessPluginManager {
         let mut child = Command::new(&plugin.path)
             .arg("--meta-plugin-exec")
             .stdin(Stdio::piped())
-            .stdout(Stdio::inherit()) // Let plugin output directly
-            .stderr(Stdio::inherit())
+            .stdout(Stdio::piped()) // Capture stdout to parse response
+            .stderr(Stdio::inherit()) // Let stderr pass through for error messages
             .spawn()
             .with_context(|| format!("Failed to execute plugin {}", plugin.path.display()))?;
 
@@ -321,12 +333,72 @@ impl SubprocessPluginManager {
             stdin.write_all(request_json.as_bytes())?;
         }
 
-        let status = child.wait()?;
+        let output = child.wait_with_output()?;
 
-        if !status.success() {
-            anyhow::bail!("Plugin {} exited with status {}", plugin.info.name, status);
+        if !output.status.success() {
+            anyhow::bail!("Plugin {} exited with status {}", plugin.info.name, output.status);
         }
 
+        // Try to parse the response as JSON
+        let stdout_str = String::from_utf8_lossy(&output.stdout);
+
+        // If stdout is empty, plugin handled execution silently
+        if stdout_str.trim().is_empty() {
+            return Ok(true);
+        }
+
+        // If stdout doesn't look like JSON, print it (legacy plugin output)
+        if !stdout_str.trim().starts_with('{') {
+            print!("{}", stdout_str);
+            return Ok(true);
+        }
+
+        // Parse the plugin response
+        match serde_json::from_str::<PluginResponse>(&stdout_str) {
+            Ok(response) => {
+                // Plugin returned an execution plan - execute it via loop_lib
+                self.execute_plan(&response.plan, options)
+            }
+            Err(_) => {
+                // Couldn't parse as our protocol - print output as-is (legacy behavior)
+                print!("{}", stdout_str);
+                Ok(true)
+            }
+        }
+    }
+
+    /// Execute an execution plan via loop_lib
+    fn execute_plan(&self, plan: &ExecutionPlan, options: &PluginRequestOptions) -> Result<bool> {
+        use loop_lib::{DirCommand, LoopConfig, run_commands};
+
+        if plan.commands.is_empty() {
+            return Ok(true); // Nothing to execute
+        }
+
+        // Convert plan commands to loop_lib DirCommand format
+        let commands: Vec<DirCommand> = plan.commands
+            .iter()
+            .map(|c| DirCommand {
+                dir: c.dir.clone(),
+                cmd: c.cmd.clone(),
+            })
+            .collect();
+
+        let config = LoopConfig {
+            directories: vec![], // Not used by run_commands
+            ignore: vec![],
+            verbose: options.verbose,
+            silent: options.silent,
+            add_aliases_to_global_looprc: false,
+            include_filters: options.include_filters.clone(),
+            exclude_filters: options.exclude_filters.clone(),
+            parallel: plan.parallel.unwrap_or(options.parallel),
+            dry_run: options.dry_run,
+            json_output: options.json_output,
+            spawn_stagger_ms: 0,
+        };
+
+        run_commands(&config, &commands)?;
         Ok(true)
     }
 
@@ -531,6 +603,8 @@ mod tests {
                 json_output: true,
                 verbose: false,
                 parallel: true,
+                dry_run: false,
+                ..Default::default()
             },
         };
 
@@ -546,6 +620,10 @@ mod tests {
         assert!(!options.json_output);
         assert!(!options.verbose);
         assert!(!options.parallel);
+        assert!(!options.dry_run);
+        assert!(!options.silent);
+        assert!(options.include_filters.is_none());
+        assert!(options.exclude_filters.is_none());
     }
 
     #[test]
@@ -759,5 +837,287 @@ mod tests {
         assert!(help.commands.is_empty());
         assert!(help.examples.is_empty());
         assert!(help.note.is_none());
+    }
+
+    // ============ PluginResponse Parsing Tests ============
+
+    #[test]
+    fn test_plugin_response_basic() {
+        let json = r#"{
+            "plan": {
+                "commands": [
+                    {"dir": "./repo1", "cmd": "git status"},
+                    {"dir": "./repo2", "cmd": "git status"}
+                ]
+            }
+        }"#;
+        let response: PluginResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.plan.commands.len(), 2);
+        assert_eq!(response.plan.commands[0].dir, "./repo1");
+        assert_eq!(response.plan.commands[0].cmd, "git status");
+        assert_eq!(response.plan.commands[1].dir, "./repo2");
+        assert_eq!(response.plan.commands[1].cmd, "git status");
+        assert!(response.plan.parallel.is_none());
+    }
+
+    #[test]
+    fn test_plugin_response_with_parallel() {
+        let json = r#"{
+            "plan": {
+                "commands": [
+                    {"dir": "/abs/path", "cmd": "npm install"}
+                ],
+                "parallel": true
+            }
+        }"#;
+        let response: PluginResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.plan.commands.len(), 1);
+        assert_eq!(response.plan.parallel, Some(true));
+    }
+
+    #[test]
+    fn test_plugin_response_parallel_false() {
+        let json = r#"{
+            "plan": {
+                "commands": [
+                    {"dir": ".", "cmd": "echo hello"}
+                ],
+                "parallel": false
+            }
+        }"#;
+        let response: PluginResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.plan.parallel, Some(false));
+    }
+
+    #[test]
+    fn test_plugin_response_empty_commands() {
+        let json = r#"{
+            "plan": {
+                "commands": []
+            }
+        }"#;
+        let response: PluginResponse = serde_json::from_str(json).unwrap();
+        assert!(response.plan.commands.is_empty());
+    }
+
+    // ============ ExecutionPlan Tests ============
+
+    #[test]
+    fn test_execution_plan_deserialization() {
+        let json = r#"{
+            "commands": [
+                {"dir": "proj1", "cmd": "make build"},
+                {"dir": "proj2", "cmd": "cargo build"}
+            ],
+            "parallel": true
+        }"#;
+        let plan: ExecutionPlan = serde_json::from_str(json).unwrap();
+        assert_eq!(plan.commands.len(), 2);
+        assert_eq!(plan.commands[0].dir, "proj1");
+        assert_eq!(plan.commands[0].cmd, "make build");
+        assert_eq!(plan.commands[1].dir, "proj2");
+        assert_eq!(plan.commands[1].cmd, "cargo build");
+        assert_eq!(plan.parallel, Some(true));
+    }
+
+    #[test]
+    fn test_execution_plan_no_parallel_field() {
+        let json = r#"{
+            "commands": [
+                {"dir": ".", "cmd": "ls"}
+            ]
+        }"#;
+        let plan: ExecutionPlan = serde_json::from_str(json).unwrap();
+        assert!(plan.parallel.is_none());
+    }
+
+    // ============ PlannedCommand Tests ============
+
+    #[test]
+    fn test_planned_command_deserialization() {
+        let json = r#"{"dir": "/home/user/project", "cmd": "git pull --rebase"}"#;
+        let cmd: PlannedCommand = serde_json::from_str(json).unwrap();
+        assert_eq!(cmd.dir, "/home/user/project");
+        assert_eq!(cmd.cmd, "git pull --rebase");
+    }
+
+    #[test]
+    fn test_planned_command_relative_dir() {
+        let json = r#"{"dir": "./relative/path", "cmd": "npm test"}"#;
+        let cmd: PlannedCommand = serde_json::from_str(json).unwrap();
+        assert_eq!(cmd.dir, "./relative/path");
+        assert_eq!(cmd.cmd, "npm test");
+    }
+
+    #[test]
+    fn test_planned_command_complex_command() {
+        let json = r#"{"dir": ".", "cmd": "git clone https://github.com/org/repo.git --depth 1"}"#;
+        let cmd: PlannedCommand = serde_json::from_str(json).unwrap();
+        assert_eq!(cmd.cmd, "git clone https://github.com/org/repo.git --depth 1");
+    }
+
+    // ============ PluginRequest with dry_run Tests ============
+
+    #[test]
+    fn test_plugin_request_with_dry_run() {
+        let request = PluginRequest {
+            command: "git status".to_string(),
+            args: vec![],
+            projects: vec!["proj1".to_string()],
+            cwd: "/workspace".to_string(),
+            options: PluginRequestOptions {
+                json_output: false,
+                verbose: false,
+                parallel: false,
+                dry_run: true,
+                ..Default::default()
+            },
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"dry_run\":true"));
+    }
+
+    #[test]
+    fn test_plugin_request_all_options_enabled() {
+        let request = PluginRequest {
+            command: "build".to_string(),
+            args: vec!["--release".to_string()],
+            projects: vec![],
+            cwd: ".".to_string(),
+            options: PluginRequestOptions {
+                json_output: true,
+                verbose: true,
+                parallel: true,
+                dry_run: true,
+                silent: true,
+                include_filters: Some(vec!["frontend".to_string()]),
+                exclude_filters: Some(vec!["tests".to_string()]),
+            },
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"json_output\":true"));
+        assert!(json.contains("\"verbose\":true"));
+        assert!(json.contains("\"parallel\":true"));
+        assert!(json.contains("\"dry_run\":true"));
+        assert!(json.contains("\"silent\":true"));
+        assert!(json.contains("\"include_filters\""));
+        assert!(json.contains("\"exclude_filters\""));
+    }
+
+    // ============ Edge Cases and Error Handling ============
+
+    #[test]
+    fn test_plugin_response_invalid_json() {
+        // Invalid JSON should fail to parse
+        let json = r#"{"plan": "not an object"}"#;
+        let result: Result<PluginResponse, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_plugin_response_missing_plan() {
+        // Missing plan field should fail
+        let json = r#"{"commands": []}"#;
+        let result: Result<PluginResponse, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_execution_plan_multiple_different_commands() {
+        // Test a realistic execution plan with different commands per directory
+        let json = r#"{
+            "commands": [
+                {"dir": "./frontend", "cmd": "npm install"},
+                {"dir": "./backend", "cmd": "cargo build"},
+                {"dir": "./scripts", "cmd": "python setup.py install"},
+                {"dir": "./docs", "cmd": "make html"}
+            ],
+            "parallel": false
+        }"#;
+        let plan: ExecutionPlan = serde_json::from_str(json).unwrap();
+        assert_eq!(plan.commands.len(), 4);
+        assert_eq!(plan.commands[0].cmd, "npm install");
+        assert_eq!(plan.commands[1].cmd, "cargo build");
+        assert_eq!(plan.commands[2].cmd, "python setup.py install");
+        assert_eq!(plan.commands[3].cmd, "make html");
+    }
+
+    #[test]
+    fn test_planned_command_with_special_characters() {
+        let json = r#"{"dir": "./path with spaces", "cmd": "echo \"hello world\" && echo 'single quotes'"}"#;
+        let cmd: PlannedCommand = serde_json::from_str(json).unwrap();
+        assert_eq!(cmd.dir, "./path with spaces");
+        assert_eq!(cmd.cmd, "echo \"hello world\" && echo 'single quotes'");
+    }
+
+    // ============ get_plugin_for_command Tests ============
+
+    #[test]
+    fn test_get_plugin_for_command_found() {
+        let mut manager = SubprocessPluginManager::new();
+        manager.plugins.insert(
+            "git".to_string(),
+            SubprocessPlugin {
+                path: std::path::PathBuf::from("/fake/meta-git"),
+                info: PluginInfo {
+                    name: "git".to_string(),
+                    version: "1.0.0".to_string(),
+                    commands: vec!["git status".to_string()],
+                    description: None,
+                    help: None,
+                },
+            },
+        );
+
+        let plugin = manager.get_plugin_for_command("git status");
+        assert!(plugin.is_some());
+        assert_eq!(plugin.unwrap().info.name, "git");
+    }
+
+    #[test]
+    fn test_get_plugin_for_command_not_found() {
+        let manager = SubprocessPluginManager::new();
+        let plugin = manager.get_plugin_for_command("unknown command");
+        assert!(plugin.is_none());
+    }
+
+    #[test]
+    fn test_get_plugin_for_command_empty() {
+        let manager = SubprocessPluginManager::new();
+        let plugin = manager.get_plugin_for_command("");
+        assert!(plugin.is_none());
+    }
+
+    // ============ get_plugin Tests ============
+
+    #[test]
+    fn test_get_plugin_found() {
+        let mut manager = SubprocessPluginManager::new();
+        manager.plugins.insert(
+            "test".to_string(),
+            SubprocessPlugin {
+                path: std::path::PathBuf::from("/fake/meta-test"),
+                info: PluginInfo {
+                    name: "test".to_string(),
+                    version: "2.0.0".to_string(),
+                    commands: vec![],
+                    description: Some("Test plugin".to_string()),
+                    help: None,
+                },
+            },
+        );
+
+        let plugin = manager.get_plugin("test");
+        assert!(plugin.is_some());
+        assert_eq!(plugin.unwrap().info.version, "2.0.0");
+    }
+
+    #[test]
+    fn test_get_plugin_not_found() {
+        let manager = SubprocessPluginManager::new();
+        let plugin = manager.get_plugin("nonexistent");
+        assert!(plugin.is_none());
     }
 }

@@ -55,6 +55,9 @@ struct Cli {
         help = "Maximum depth for recursive processing (default: unlimited)"
     )]
     depth: Option<usize>,
+
+    #[arg(long, help = "Show what commands would be run without executing them")]
+    dry_run: bool,
 }
 
 fn main() -> Result<()> {
@@ -101,6 +104,39 @@ fn main() -> Result<()> {
 
     let command_str = cli.command.join(" ");
 
+    // Check if this is `git clone` - it doesn't require a .meta file because
+    // its purpose is to clone the repo that contains the .meta file
+    let is_git_clone_bootstrap = cli.command.first().map(|s| s == "git").unwrap_or(false)
+        && cli.command.get(1).map(|s| s == "clone").unwrap_or(false);
+
+    if is_git_clone_bootstrap {
+        // Handle git clone directly via plugin without requiring .meta file
+        // Build args: everything after "git clone" (i.e., URL and other git options)
+        let clone_args: Vec<String> = cli.command.iter().skip(2).cloned().collect();
+
+        let subprocess_options = PluginRequestOptions {
+            json_output: cli.json,
+            verbose: cli.verbose,
+            parallel: false,
+            dry_run: cli.dry_run,
+            silent: cli.silent,
+            include_filters: None,
+            exclude_filters: None,
+        };
+
+        // Pass "git clone" as command, and the URL/options as args
+        if subprocess_plugins.execute("git clone", &clone_args, &[], subprocess_options)? {
+            if cli.verbose {
+                println!("{}", "Git clone handled by subprocess plugin.".green());
+            }
+            return Ok(());
+        } else {
+            eprintln!("Error: No plugin available to handle 'git clone'");
+            eprintln!("Make sure meta-git plugin is installed.");
+            std::process::exit(1);
+        }
+    }
+
     let current_dir = std::env::current_dir()?;
     let absolute_path = match find_meta_config(&current_dir, cli.config.as_ref()) {
         Some((path, _format)) => path,
@@ -143,33 +179,15 @@ fn main() -> Result<()> {
         meta_projects.iter().collect()
     };
 
-    let mut project_paths = vec![".".to_string()];
-    project_paths.extend(
-        filtered_projects
-            .iter()
-            .map(|p| meta_dir.join(&p.path).to_string_lossy().to_string()),
-    );
-
-    // If recursive mode is enabled, discover nested meta repos
-    if cli.recursive {
-        let max_depth = cli.depth.unwrap_or(usize::MAX);
-        if cli.verbose {
-            println!(
-                "Recursive mode enabled, max depth: {}",
-                if max_depth == usize::MAX {
-                    "unlimited".to_string()
-                } else {
-                    max_depth.to_string()
-                }
-            );
-        }
-        project_paths = discover_nested_projects(&project_paths, &cli.tag, max_depth, cli.verbose)?;
-    }
-
-    // Parse CLI filtering options
+    // Parse CLI filtering options from command args FIRST
+    // Note: When using trailing_var_arg, meta's own flags (--recursive, --dry-run, etc.)
+    // may end up in the command args if placed after the command. We need to extract them.
     let mut include_filters: Vec<String> = vec![];
     let mut exclude_filters: Vec<String> = vec![];
     let mut parallel = false;
+    let mut recursive_from_args = false;
+    let mut dry_run_from_args = false;
+    let mut depth_from_args: Option<usize> = None;
     let mut cleaned_command = vec![];
 
     let mut idx = 0;
@@ -201,6 +219,23 @@ fn main() -> Result<()> {
                 parallel = true;
                 idx += 1;
             }
+            "--recursive" | "-r" => {
+                recursive_from_args = true;
+                idx += 1;
+            }
+            "--dry-run" => {
+                dry_run_from_args = true;
+                idx += 1;
+            }
+            "--depth" => {
+                idx += 1;
+                if idx < cli.command.len() {
+                    if let Ok(d) = cli.command[idx].parse::<usize>() {
+                        depth_from_args = Some(d);
+                    }
+                    idx += 1;
+                }
+            }
             arg => {
                 cleaned_command.push(arg.to_string());
                 idx += 1;
@@ -208,40 +243,79 @@ fn main() -> Result<()> {
         }
     }
 
+    // Merge flags parsed from args with those parsed by clap
+    let recursive = cli.recursive || recursive_from_args;
+    let dry_run = cli.dry_run || dry_run_from_args;
+    let depth = depth_from_args.or(cli.depth);
+
+    let mut project_paths = vec![".".to_string()];
+    project_paths.extend(
+        filtered_projects
+            .iter()
+            .map(|p| meta_dir.join(&p.path).to_string_lossy().to_string()),
+    );
+
+    // If recursive mode is enabled, discover nested meta repos
+    if recursive {
+        let max_depth = depth.unwrap_or(usize::MAX);
+        if cli.verbose {
+            println!(
+                "Recursive mode enabled, max depth: {}",
+                if max_depth == usize::MAX {
+                    "unlimited".to_string()
+                } else {
+                    max_depth.to_string()
+                }
+            );
+        }
+        project_paths = discover_nested_projects(&project_paths, &cli.tag, max_depth, cli.verbose)?;
+    }
+
     let command_str = cleaned_command.join(" ");
+
+    // Prepare filter options (shared by both LoopConfig and PluginRequestOptions)
+    let include_opt = if include_filters.is_empty() {
+        None
+    } else {
+        Some(include_filters)
+    };
+    let exclude_opt = if exclude_filters.is_empty() {
+        None
+    } else {
+        Some(exclude_filters)
+    };
 
     let config = loop_lib::LoopConfig {
         add_aliases_to_global_looprc: cli.add_aliases_to_global_looprc,
         directories: project_paths.clone(),
         ignore: ignore_list,
-        include_filters: if include_filters.is_empty() {
-            None
-        } else {
-            Some(include_filters)
-        },
-        exclude_filters: if exclude_filters.is_empty() {
-            None
-        } else {
-            Some(exclude_filters)
-        },
+        include_filters: include_opt.clone(),
+        exclude_filters: exclude_opt.clone(),
         verbose: cli.verbose,
         silent: cli.silent,
         parallel,
+        dry_run,
+        json_output: cli.json,
+        spawn_stagger_ms: 0,
     };
 
-    let is_git_clone = cli.command.first().map(|s| s == "git").unwrap_or(false)
-        && cli.command.get(1).map(|s| s == "clone").unwrap_or(false);
+    let is_git_clone = cleaned_command.first().map(|s| s == "git").unwrap_or(false)
+        && cleaned_command.get(1).map(|s| s == "clone").unwrap_or(false);
 
     // Try subprocess plugins first (preferred)
     let subprocess_options = PluginRequestOptions {
         json_output: cli.json,
         verbose: cli.verbose,
         parallel,
+        dry_run,
+        silent: cli.silent,
+        include_filters: include_opt,
+        exclude_filters: exclude_opt,
     };
 
     if subprocess_plugins.execute(
         &command_str,
-        &cli.command,
+        &cleaned_command,
         &project_paths,
         subprocess_options,
     )? {
