@@ -80,9 +80,12 @@ fn main() -> Result<()> {
     }
 
     // Check if user wants plugin help (e.g., "meta git --help" or "meta git -h")
+    // Also show help if command is just a plugin name with no subcommand (e.g., "meta git" or "meta project")
     if let Some(first_arg) = cli.command.first() {
         let wants_help = cli.command.iter().any(|arg| arg == "--help" || arg == "-h");
-        if wants_help {
+        let is_bare_plugin_command = cli.command.len() == 1;
+
+        if wants_help || is_bare_plugin_command {
             // Check if this is a plugin command
             if let Some(help_text) = subprocess_plugins.get_plugin_help(first_arg) {
                 println!("{help_text}");
