@@ -246,16 +246,14 @@ impl SubprocessPluginManager {
             return false;
         }
 
-        // Try matching "git status" style (two words)
-        let two_word = if cmd_parts.len() >= 2 {
-            format!("{} {}", cmd_parts[0], cmd_parts[1])
-        } else {
-            String::new()
-        };
-
         for plugin in self.plugins.values() {
             for plugin_cmd in &plugin.info.commands {
-                if plugin_cmd == command || plugin_cmd == &two_word || plugin_cmd == cmd_parts[0] {
+                // Check if the input command starts with this plugin command
+                if command == plugin_cmd || command.starts_with(&format!("{} ", plugin_cmd)) {
+                    return true;
+                }
+                // Also check single-word match for fallback
+                if plugin_cmd == cmd_parts[0] {
                     return true;
                 }
             }
@@ -276,20 +274,32 @@ impl SubprocessPluginManager {
             return Ok(false);
         }
 
-        // Find the right plugin
-        let two_word = if cmd_parts.len() >= 2 {
-            format!("{} {}", cmd_parts[0], cmd_parts[1])
-        } else {
-            String::new()
-        };
+        // Find the best (longest) matching command across all plugins
+        let mut best_match: Option<(&SubprocessPlugin, &str)> = None;
+        let mut best_match_len = 0;
 
         for plugin in self.plugins.values() {
             for plugin_cmd in &plugin.info.commands {
-                if plugin_cmd == command || plugin_cmd == &two_word || plugin_cmd == cmd_parts[0] {
-                    return self.execute_plugin(plugin, command, args, projects, &options);
+                // Check if the input command starts with this plugin command
+                if command == plugin_cmd || command.starts_with(&format!("{} ", plugin_cmd)) {
+                    let cmd_len = plugin_cmd.split_whitespace().count();
+                    if cmd_len > best_match_len {
+                        best_match = Some((plugin, plugin_cmd));
+                        best_match_len = cmd_len;
+                    }
+                }
+                // Also check single-word match for fallback (e.g., "git" matches "git status")
+                else if plugin_cmd == cmd_parts[0] && best_match_len == 0 {
+                    best_match = Some((plugin, plugin_cmd));
+                    best_match_len = 1;
                 }
             }
         }
+
+        if let Some((plugin, matched_cmd)) = best_match {
+            return self.execute_plugin(plugin, matched_cmd, args, projects, &options);
+        }
+
         Ok(false)
     }
 
@@ -302,9 +312,15 @@ impl SubprocessPluginManager {
         projects: &[String],
         options: &PluginRequestOptions,
     ) -> Result<bool> {
+        // Extract the remaining args after the matched command
+        // e.g., if command is "git snapshot create" and args is ["git", "snapshot", "create", "test-snapshot"]
+        // then remaining_args should be ["test-snapshot"]
+        let cmd_word_count = command.split_whitespace().count();
+        let remaining_args: Vec<String> = args.iter().skip(cmd_word_count).cloned().collect();
+
         let request = PluginRequest {
             command: command.to_string(),
-            args: args.to_vec(),
+            args: remaining_args,
             projects: projects.to_vec(),
             cwd: std::env::current_dir()?.to_string_lossy().to_string(),
             options: options.clone(),
