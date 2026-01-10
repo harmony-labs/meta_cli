@@ -6,6 +6,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+mod init;
 mod registry;
 mod subprocess_plugins;
 
@@ -100,6 +101,11 @@ fn main() -> Result<()> {
     // Handle plugin management commands (don't require .meta file)
     if cli.command.first().map(|s| s.as_str()) == Some("plugin") {
         return handle_plugin_command(&cli.command[1..], cli.verbose, cli.json);
+    }
+
+    // Handle init commands (don't require .meta file)
+    if cli.command.first().map(|s| s.as_str()) == Some("init") {
+        return init::handle_init_command(&cli.command[1..], cli.verbose);
     }
 
     let command_str = cli.command.join(" ");
