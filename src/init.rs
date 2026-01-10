@@ -9,17 +9,17 @@ use std::fs;
 use std::path::Path;
 
 /// Embedded skill files from the meta repository
-const SKILL_META_CORE: &str = include_str!("../../.claude/skills/meta-core.md");
+const SKILL_META_WORKSPACE: &str = include_str!("../../.claude/skills/meta-workspace.md");
 const SKILL_META_GIT: &str = include_str!("../../.claude/skills/meta-git.md");
-const SKILL_META_BUILD: &str = include_str!("../../.claude/skills/meta-build.md");
-const SKILL_META_DISCOVER: &str = include_str!("../../.claude/skills/meta-discover.md");
+const SKILL_META_EXEC: &str = include_str!("../../.claude/skills/meta-exec.md");
+const SKILL_META_PLUGINS: &str = include_str!("../../.claude/skills/meta-plugins.md");
 
 /// All available skills with their filenames
 const SKILLS: &[(&str, &str)] = &[
-    ("meta-core.md", SKILL_META_CORE),
+    ("meta-workspace.md", SKILL_META_WORKSPACE),
     ("meta-git.md", SKILL_META_GIT),
-    ("meta-build.md", SKILL_META_BUILD),
-    ("meta-discover.md", SKILL_META_DISCOVER),
+    ("meta-exec.md", SKILL_META_EXEC),
+    ("meta-plugins.md", SKILL_META_PLUGINS),
 ];
 
 /// Handle the `meta init` subcommand
@@ -173,10 +173,10 @@ mod tests {
 
         let skills_dir = dir.path().join(".claude").join("skills");
         assert!(skills_dir.exists());
-        assert!(skills_dir.join("meta-core.md").exists());
+        assert!(skills_dir.join("meta-workspace.md").exists());
         assert!(skills_dir.join("meta-git.md").exists());
-        assert!(skills_dir.join("meta-build.md").exists());
-        assert!(skills_dir.join("meta-discover.md").exists());
+        assert!(skills_dir.join("meta-exec.md").exists());
+        assert!(skills_dir.join("meta-plugins.md").exists());
     }
 
     #[test]
@@ -187,7 +187,7 @@ mod tests {
         fs::create_dir_all(&skills_dir).unwrap();
 
         // Create an existing file with different content
-        let existing = skills_dir.join("meta-core.md");
+        let existing = skills_dir.join("meta-workspace.md");
         fs::write(&existing, "custom content").unwrap();
 
         install_claude_skills_to(dir.path(), false, false).unwrap();
@@ -205,13 +205,13 @@ mod tests {
         fs::create_dir_all(&skills_dir).unwrap();
 
         // Create an existing file with different content
-        let existing = skills_dir.join("meta-core.md");
+        let existing = skills_dir.join("meta-workspace.md");
         fs::write(&existing, "custom content").unwrap();
 
         install_claude_skills_to(dir.path(), true, false).unwrap();
 
         // Should overwrite with embedded content
         let content = fs::read_to_string(&existing).unwrap();
-        assert!(content.contains("Meta Core Skill"));
+        assert!(content.contains("Meta Workspace Skill"));
     }
 }
