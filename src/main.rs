@@ -8,6 +8,7 @@ use std::path::PathBuf;
 mod init;
 mod registry;
 mod subprocess_plugins;
+mod worktree;
 
 use subprocess_plugins::{PluginRequestOptions, SubprocessPluginManager};
 
@@ -105,6 +106,11 @@ fn main() -> Result<()> {
     // Handle init commands (don't require .meta file)
     if cli.command.first().map(|s| s.as_str()) == Some("init") {
         return init::handle_init_command(&cli.command[1..], cli.verbose);
+    }
+
+    // Handle worktree commands (some subcommands don't require .meta file)
+    if cli.command.first().map(|s| s.as_str()) == Some("worktree") {
+        return worktree::handle_worktree_command(&cli.command[1..], cli.verbose, cli.json);
     }
 
     let command_str = cli.command.join(" ");
