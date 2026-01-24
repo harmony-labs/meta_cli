@@ -1,9 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{CommandFactory, Parser};
 use colored::*;
 use loop_lib::run;
-use serde::Deserialize;
-use std::collections::HashMap;
+use meta_cli::config::{self, find_meta_config, parse_meta_config, MetaTreeNode, ProjectInfo};
 use std::path::PathBuf;
 
 mod init;
@@ -126,6 +125,8 @@ fn main() -> Result<()> {
             parallel: false,
             dry_run: cli.dry_run,
             silent: cli.silent,
+            recursive: false,
+            depth: None,
             include_filters: None,
             exclude_filters: None,
         };
@@ -263,18 +264,17 @@ fn main() -> Result<()> {
 
     // If recursive mode is enabled, discover nested meta repos
     if recursive {
-        let max_depth = depth.unwrap_or(usize::MAX);
         if cli.verbose {
-            println!(
-                "Recursive mode enabled, max depth: {}",
-                if max_depth == usize::MAX {
-                    "unlimited".to_string()
-                } else {
-                    max_depth.to_string()
-                }
-            );
+            let depth_str = depth.map_or("unlimited".to_string(), |d| d.to_string());
+            println!("Recursive mode enabled, max depth: {}", depth_str);
         }
-        project_paths = discover_nested_projects(&project_paths, &cli.tag, max_depth, cli.verbose)?;
+        let tree = config::walk_meta_tree(&meta_dir, depth)?;
+        project_paths = vec![".".to_string()];
+        let flat = flatten_with_tag_filter(&tree, &cli.tag);
+        project_paths.extend(
+            flat.iter()
+                .map(|p| meta_dir.join(p).to_string_lossy().to_string()),
+        );
     }
 
     let command_str = cleaned_command.join(" ");
@@ -315,6 +315,8 @@ fn main() -> Result<()> {
         parallel,
         dry_run,
         silent: cli.silent,
+        recursive,
+        depth,
         include_filters: include_opt,
         exclude_filters: exclude_opt,
     };
@@ -352,192 +354,40 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Represents a project entry in the .meta config.
-/// Can be either a simple git URL string or an extended object with optional fields.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-enum ProjectEntry {
-    /// Simple format: just a git URL string
-    Simple(String),
-    /// Extended format: object with repo, optional path, and optional tags
-    Extended {
-        repo: String,
-        #[serde(default)]
-        path: Option<String>,
-        #[serde(default)]
-        tags: Vec<String>,
-    },
+
+/// Flatten a meta tree into path strings, optionally filtering by tag.
+/// If tag_filter is Some, only includes nodes whose tags match (and recurses into them).
+fn flatten_with_tag_filter(nodes: &[MetaTreeNode], tag_filter: &Option<String>) -> Vec<String> {
+    let mut paths = Vec::new();
+    flatten_filtered_inner(nodes, tag_filter, "", &mut paths);
+    paths
 }
 
-/// Parsed project info after normalization
-#[derive(Debug, Clone)]
-pub struct ProjectInfo {
-    pub name: String,
-    pub path: String,
-    pub repo: String,
-    pub tags: Vec<String>,
-}
-
-/// The meta configuration file structure
-#[derive(Debug, Deserialize, Default)]
-struct MetaConfig {
-    #[serde(default)]
-    projects: HashMap<String, ProjectEntry>,
-    #[serde(default)]
-    ignore: Vec<String>,
-}
-
-/// Determines the format of a config file based on extension
-#[derive(Clone)]
-enum ConfigFormat {
-    Json,
-    Yaml,
-}
-
-/// Find the meta config file, checking for .meta, .meta.yaml, and .meta.yml
-fn find_meta_config(
-    start_dir: &std::path::Path,
-    config_name: Option<&PathBuf>,
-) -> Option<(PathBuf, ConfigFormat)> {
-    let candidates: Vec<(String, ConfigFormat)> = if let Some(name) = config_name {
-        // User specified a config file name
-        let name_str = name.to_string_lossy().to_string();
-        if name_str.ends_with(".yaml") || name_str.ends_with(".yml") {
-            vec![(name_str, ConfigFormat::Yaml)]
-        } else {
-            vec![(name_str, ConfigFormat::Json)]
-        }
-    } else {
-        // Default: check all supported names
-        vec![
-            (".meta".to_string(), ConfigFormat::Json),
-            (".meta.yaml".to_string(), ConfigFormat::Yaml),
-            (".meta.yml".to_string(), ConfigFormat::Yaml),
-        ]
-    };
-
-    let mut current_dir = start_dir.to_path_buf();
-    loop {
-        for (name, format) in &candidates {
-            let candidate = current_dir.join(name);
-            if candidate.exists() {
-                return Some((candidate, format.clone()));
-            }
-        }
-        if let Some(parent) = current_dir.parent() {
-            current_dir = parent.to_path_buf();
-        } else {
-            return None;
-        }
-    }
-}
-
-fn parse_meta_config(
-    meta_path: &std::path::Path,
-) -> anyhow::Result<(Vec<ProjectInfo>, Vec<String>)> {
-    let config_str = std::fs::read_to_string(meta_path)
-        .with_context(|| format!("Failed to read meta config file: '{}'", meta_path.display()))?;
-
-    // Determine format from file extension
-    let path_str = meta_path.to_string_lossy();
-    let config: MetaConfig = if path_str.ends_with(".yaml") || path_str.ends_with(".yml") {
-        serde_yaml::from_str(&config_str)
-            .with_context(|| format!("Failed to parse YAML config file: {}", meta_path.display()))?
-    } else {
-        serde_json::from_str(&config_str)
-            .with_context(|| format!("Failed to parse JSON config file: {}", meta_path.display()))?
-    };
-
-    // Convert project entries to normalized ProjectInfo
-    let projects: Vec<ProjectInfo> = config
-        .projects
-        .into_iter()
-        .map(|(name, entry)| {
-            let (repo, path, tags) = match entry {
-                ProjectEntry::Simple(repo) => (repo, name.clone(), vec![]),
-                ProjectEntry::Extended { repo, path, tags } => {
-                    let resolved_path = path.unwrap_or_else(|| name.clone());
-                    (repo, resolved_path, tags)
-                }
-            };
-            ProjectInfo {
-                name,
-                path,
-                repo,
-                tags,
-            }
-        })
-        .collect();
-
-    Ok((projects, config.ignore))
-}
-
-/// Recursively discover nested meta repos and expand project paths
-fn discover_nested_projects(
-    initial_paths: &[String],
+fn flatten_filtered_inner(
+    nodes: &[MetaTreeNode],
     tag_filter: &Option<String>,
-    max_depth: usize,
-    verbose: bool,
-) -> Result<Vec<String>> {
-    let mut all_paths: Vec<String> = Vec::new();
-    let mut to_process: Vec<(String, usize)> =
-        initial_paths.iter().map(|p| (p.clone(), 0)).collect();
-    let mut visited = std::collections::HashSet::new();
-
-    while let Some((path, depth)) = to_process.pop() {
-        // Skip if already visited
-        if !visited.insert(path.clone()) {
-            continue;
-        }
-
-        all_paths.push(path.clone());
-
-        // Don't recurse deeper than max_depth
-        if depth >= max_depth {
-            continue;
-        }
-
-        // Check if this directory has a nested .meta file
-        let path_buf = std::path::PathBuf::from(&path);
-        if let Some((nested_config_path, _format)) = find_meta_config(&path_buf, None) {
-            // Don't process the root .meta again (it's already been processed)
-            if depth == 0 && path == "." {
-                continue;
+    prefix: &str,
+    paths: &mut Vec<String>,
+) {
+    for node in nodes {
+        let matches = match tag_filter {
+            Some(ref tag_str) => {
+                let requested: Vec<&str> = tag_str.split(',').map(|s| s.trim()).collect();
+                node.info.tags.iter().any(|t| requested.contains(&t.as_str()))
             }
+            None => true,
+        };
 
-            if verbose {
-                println!("Found nested meta config: {}", nested_config_path.display());
-            }
-
-            // Parse the nested config
-            if let Ok((nested_projects, _ignore)) = parse_meta_config(&nested_config_path) {
-                let nested_dir = nested_config_path
-                    .parent()
-                    .unwrap_or(std::path::Path::new("."));
-
-                // Apply tag filter if specified
-                let filtered: Vec<&ProjectInfo> = if let Some(ref tag_str) = tag_filter {
-                    let requested_tags: Vec<&str> = tag_str.split(',').map(|s| s.trim()).collect();
-                    nested_projects
-                        .iter()
-                        .filter(|p| p.tags.iter().any(|t| requested_tags.contains(&t.as_str())))
-                        .collect()
-                } else {
-                    nested_projects.iter().collect()
-                };
-
-                // Add nested projects to the processing queue
-                for project in filtered {
-                    let nested_path = nested_dir.join(&project.path).to_string_lossy().to_string();
-                    if !visited.contains(&nested_path) {
-                        to_process.push((nested_path, depth + 1));
-                    }
-                }
-            }
+        if matches {
+            let full_path = if prefix.is_empty() {
+                node.info.path.clone()
+            } else {
+                format!("{}/{}", prefix, node.info.path)
+            };
+            paths.push(full_path.clone());
+            flatten_filtered_inner(&node.children, tag_filter, &full_path, paths);
         }
     }
-
-    Ok(all_paths)
 }
 
 /// Handle plugin management subcommands
@@ -861,14 +711,19 @@ projects:
     #[test]
     fn test_discover_nested_projects_no_nested() {
         let dir = tempfile::tempdir().unwrap();
-        // Create a simple project directory without nested .meta
+        // Create a .meta with a project that has no nested .meta
         let project_dir = dir.path().join("project1");
         std::fs::create_dir(&project_dir).unwrap();
+        std::fs::write(
+            dir.path().join(".meta"),
+            r#"{"projects": {"project1": "git@github.com:org/project1.git"}}"#,
+        )
+        .unwrap();
 
-        let initial_paths = vec![".".to_string(), project_dir.to_string_lossy().to_string()];
-
-        let result = discover_nested_projects(&initial_paths, &None, usize::MAX, false).unwrap();
-        assert_eq!(result.len(), 2);
+        let tree = config::walk_meta_tree(dir.path(), None).unwrap();
+        let paths = config::flatten_meta_tree(&tree);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], "project1");
     }
 
     #[test]
@@ -886,68 +741,67 @@ projects:
         let subproject_dir = project1_dir.join("subproject");
         std::fs::create_dir_all(&subproject_dir).unwrap();
 
-        // Create nested .meta in project1
-        let nested_meta = project1_dir.join(".meta");
         std::fs::write(
-            &nested_meta,
+            dir.path().join(".meta"),
+            r#"{"projects": {"project1": "git@github.com:org/project1.git"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project1_dir.join(".meta"),
             r#"{"projects": {"subproject": "git@github.com:org/subproject.git"}}"#,
         )
         .unwrap();
 
-        let initial_paths = vec![
-            dir.path().to_string_lossy().to_string(),
-            project1_dir.to_string_lossy().to_string(),
-        ];
+        let tree = config::walk_meta_tree(dir.path(), None).unwrap();
+        let paths = config::flatten_meta_tree(&tree);
 
-        let result = discover_nested_projects(&initial_paths, &None, usize::MAX, false).unwrap();
-
-        // Should include root, project1, and subproject
-        assert!(result.len() >= 2);
-        // Check that subproject was discovered
-        let has_subproject = result.iter().any(|p| p.contains("subproject"));
-        assert!(has_subproject, "Nested subproject should be discovered");
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&"project1".to_string()));
+        assert!(paths.contains(&"project1/subproject".to_string()));
     }
 
     #[test]
     fn test_discover_nested_projects_with_depth_limit() {
         let dir = tempfile::tempdir().unwrap();
 
-        // Create deeply nested structure
         let level1 = dir.path().join("level1");
         let level2 = level1.join("level2");
         std::fs::create_dir_all(&level2).unwrap();
 
-        // Create .meta at level1
+        std::fs::write(
+            dir.path().join(".meta"),
+            r#"{"projects": {"level1": "git@github.com:org/level1.git"}}"#,
+        )
+        .unwrap();
         std::fs::write(
             level1.join(".meta"),
             r#"{"projects": {"level2": "git@github.com:org/level2.git"}}"#,
         )
         .unwrap();
 
-        let initial_paths = vec![level1.to_string_lossy().to_string()];
+        // depth 0: no recursion into nested .meta
+        let tree_0 = config::walk_meta_tree(dir.path(), Some(0)).unwrap();
+        let paths_0 = config::flatten_meta_tree(&tree_0);
+        assert_eq!(paths_0, vec!["level1"]);
 
-        // With depth 0, should not recurse into level2
-        let result_depth_0 = discover_nested_projects(&initial_paths, &None, 0, false).unwrap();
-        assert_eq!(result_depth_0.len(), 1); // Only level1
-
-        // With depth 1, should include level2
-        let result_depth_1 = discover_nested_projects(&initial_paths, &None, 1, false).unwrap();
-        assert!(!result_depth_1.is_empty());
+        // depth 1: recurse one level
+        let tree_1 = config::walk_meta_tree(dir.path(), Some(1)).unwrap();
+        let paths_1 = config::flatten_meta_tree(&tree_1);
+        assert_eq!(paths_1.len(), 2);
+        assert!(paths_1.contains(&"level1/level2".to_string()));
     }
 
     #[test]
     fn test_discover_nested_projects_with_tag_filter() {
         let dir = tempfile::tempdir().unwrap();
 
-        let project_dir = dir.path().join("project");
-        let frontend_dir = project_dir.join("frontend");
-        let backend_dir = project_dir.join("backend");
+        let frontend_dir = dir.path().join("frontend");
+        let backend_dir = dir.path().join("backend");
         std::fs::create_dir_all(&frontend_dir).unwrap();
         std::fs::create_dir_all(&backend_dir).unwrap();
 
-        // Create .meta with tagged projects
         std::fs::write(
-            project_dir.join(".meta"),
+            dir.path().join(".meta"),
             r#"{
                 "projects": {
                     "frontend": {
@@ -963,14 +817,9 @@ projects:
         )
         .unwrap();
 
-        let initial_paths = vec![project_dir.to_string_lossy().to_string()];
+        let tree = config::walk_meta_tree(dir.path(), None).unwrap();
+        let result = flatten_with_tag_filter(&tree, &Some("ui".to_string()));
 
-        // Filter by "ui" tag
-        let result =
-            discover_nested_projects(&initial_paths, &Some("ui".to_string()), usize::MAX, false)
-                .unwrap();
-
-        // Should include project and frontend, but not backend
         let has_frontend = result.iter().any(|p| p.contains("frontend"));
         let has_backend = result.iter().any(|p| p.contains("backend"));
         assert!(has_frontend, "Frontend should be included (has 'ui' tag)");

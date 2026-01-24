@@ -56,6 +56,8 @@ pub struct PluginRequestOptions {
     pub parallel: bool,
     pub dry_run: bool,
     pub silent: bool,
+    pub recursive: bool,
+    pub depth: Option<usize>,
     pub include_filters: Option<Vec<String>>,
     pub exclude_filters: Option<Vec<String>>,
 }
@@ -1007,6 +1009,8 @@ mod tests {
                 parallel: true,
                 dry_run: true,
                 silent: true,
+                recursive: true,
+                depth: Some(3),
                 include_filters: Some(vec!["frontend".to_string()]),
                 exclude_filters: Some(vec!["tests".to_string()]),
             },
