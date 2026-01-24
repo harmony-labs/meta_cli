@@ -200,7 +200,7 @@ fn main() -> Result<()> {
     let mut idx = 0;
     while idx < cli.command.len() {
         match cli.command[idx].as_str() {
-            "--include-only" => {
+            "--include" => {
                 idx += 1;
                 while idx < cli.command.len() && !cli.command[idx].starts_with("--") {
                     let parts = cli.command[idx]
@@ -248,6 +248,27 @@ fn main() -> Result<()> {
                 idx += 1;
             }
         }
+    }
+
+    // Strip leading "exec" and "--" from the command (they are meta syntax, not part of the user command)
+    if cleaned_command.first().map(|s| s.as_str()) == Some("exec") {
+        cleaned_command.remove(0);
+    }
+    if cleaned_command.first().map(|s| s.as_str()) == Some("--") {
+        cleaned_command.remove(0);
+    }
+
+    if cleaned_command.is_empty() {
+        eprintln!("Usage: meta exec -- <command> [args...]");
+        std::process::exit(1);
+    }
+
+    // Merge clap-level --include/--exclude with trailing-arg-parsed filters
+    if let Some(ref clap_includes) = cli.include {
+        include_filters.extend(clap_includes.iter().cloned());
+    }
+    if let Some(ref clap_excludes) = cli.exclude {
+        exclude_filters.extend(clap_excludes.iter().cloned());
     }
 
     // Merge flags parsed from args with those parsed by clap

@@ -4,88 +4,15 @@
 //! This approach provides better isolation, language flexibility, and simpler debugging.
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Information about a subprocess plugin
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginInfo {
-    pub name: String,
-    pub version: String,
-    pub commands: Vec<String>,
-    #[serde(default)]
-    pub description: Option<String>,
-    /// Help information for the plugin (optional - for backward compatibility)
-    #[serde(default)]
-    pub help: Option<PluginHelp>,
-}
-
-/// Help information for a plugin
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginHelp {
-    /// Usage string (e.g., "meta git <command> [args...]")
-    pub usage: String,
-    /// Command descriptions (command name -> description)
-    #[serde(default)]
-    pub commands: std::collections::HashMap<String, String>,
-    /// Example usage strings
-    #[serde(default)]
-    pub examples: Vec<String>,
-    /// Additional note (e.g., how to run raw commands)
-    #[serde(default)]
-    pub note: Option<String>,
-}
-
-/// Request sent to a plugin for command execution
-#[derive(Debug, Serialize)]
-pub struct PluginRequest {
-    pub command: String,
-    pub args: Vec<String>,
-    pub projects: Vec<String>,
-    pub cwd: String,
-    #[serde(default)]
-    pub options: PluginRequestOptions,
-}
-
-#[derive(Debug, Default, Serialize, Clone)]
-pub struct PluginRequestOptions {
-    pub json_output: bool,
-    pub verbose: bool,
-    pub parallel: bool,
-    pub dry_run: bool,
-    pub silent: bool,
-    pub recursive: bool,
-    pub depth: Option<usize>,
-    pub include_filters: Option<Vec<String>>,
-    pub exclude_filters: Option<Vec<String>>,
-}
-
-/// Response from a plugin - an execution plan for the shim to execute via loop_lib
-#[derive(Debug, Deserialize)]
-pub struct PluginResponse {
-    pub plan: ExecutionPlan,
-}
-
-/// An execution plan returned by a plugin
-#[derive(Debug, Deserialize)]
-pub struct ExecutionPlan {
-    /// List of commands to execute
-    pub commands: Vec<PlannedCommand>,
-    /// Whether to run commands in parallel (overrides CLI --parallel if set)
-    #[serde(default)]
-    pub parallel: Option<bool>,
-}
-
-/// A single command in an execution plan
-#[derive(Debug, Deserialize)]
-pub struct PlannedCommand {
-    /// Directory to execute in (relative to meta root or absolute)
-    pub dir: String,
-    /// Command to execute
-    pub cmd: String,
-}
+#[allow(unused_imports)]
+pub use meta_plugin_protocol::{
+    ExecutionPlan, PlannedCommand, PluginHelp, PluginInfo, PluginRequest, PluginRequestOptions,
+    PlanResponse as PluginResponse,
+};
 
 /// A discovered subprocess plugin
 #[derive(Debug, Clone)]
