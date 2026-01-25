@@ -59,6 +59,9 @@ struct Cli {
 
     #[arg(long, help = "Show what commands would be run without executing them")]
     dry_run: bool,
+
+    #[arg(long, help = "Use primary checkout paths, overriding worktree context detection")]
+    primary: bool,
 }
 
 fn main() -> Result<()> {
@@ -151,6 +154,41 @@ fn main() -> Result<()> {
     }
 
     let current_dir = std::env::current_dir()?;
+
+    // Context detection: if cwd is inside a worktree, auto-scope to its repos
+    if !cli.primary {
+        if let Some((task_name, wt_paths)) = worktree::detect_worktree_context(&current_dir) {
+            if cli.verbose {
+                eprintln!(
+                    "Detected worktree context: '{}' ({} repos)",
+                    task_name,
+                    wt_paths.len()
+                );
+            }
+            let directories: Vec<String> = wt_paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect();
+
+            let config = loop_lib::LoopConfig {
+                directories,
+                ignore: vec![],
+                include_filters: cli.include.clone(),
+                exclude_filters: cli.exclude.clone(),
+                verbose: cli.verbose,
+                silent: cli.silent,
+                parallel: false,
+                dry_run: cli.dry_run,
+                json_output: cli.json,
+                add_aliases_to_global_looprc: false,
+                spawn_stagger_ms: 0,
+            };
+
+            run(&config, &command_str)?;
+            return Ok(());
+        }
+    }
+
     let absolute_path = match find_meta_config(&current_dir, cli.config.as_ref()) {
         Some((path, _format)) => path,
         None => {

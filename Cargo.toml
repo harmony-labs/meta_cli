@@ -11,6 +11,7 @@ repository.workspace = true
 description = "Multi-repo management CLI with AI integration"
 
 [dependencies]
+meta_core = { path = "../meta_core" }
 meta_plugin_protocol = { path = "../meta_plugin_protocol" }
 thiserror = "1.0"
 anyhow = "1.0"
