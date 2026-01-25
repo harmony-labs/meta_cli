@@ -8,6 +8,7 @@ use chrono::Utc;
 use colored::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -228,63 +229,76 @@ pub fn handle_worktree_command(args: &[String], verbose: bool, json: bool) -> Re
             Ok(())
         }
         other => {
-            eprintln!("Unknown worktree command: '{other}'");
-            eprintln!("Run 'meta worktree --help' for usage.");
+            eprintln!("{}: unrecognized worktree command '{}'", "error".red().bold(), other);
+            eprintln!();
+            // Print the actual help text to stderr (not a reference to --help)
+            eprint_help();
             std::process::exit(1);
         }
     }
 }
 
+/// Write help text to a writer (supports both stdout and stderr).
+fn write_help(w: &mut dyn Write) {
+    let _ = writeln!(w, "meta worktree - Multi-repo worktree management");
+    let _ = writeln!(w);
+    let _ = writeln!(w, "USAGE:");
+    let _ = writeln!(w, "  meta worktree <command> [options]");
+    let _ = writeln!(w);
+    let _ = writeln!(w, "COMMANDS:");
+    let _ = writeln!(w, "  create <name>    Create a new worktree set");
+    let _ = writeln!(w, "  add <name>       Add a repo to an existing worktree set");
+    let _ = writeln!(w, "  list             List all worktree sets");
+    let _ = writeln!(w, "  status <name>    Show detailed status of a worktree set");
+    let _ = writeln!(w, "  diff <name>      Show cross-repo diff vs base branch");
+    let _ = writeln!(w, "  exec <name>      Run a command across worktree repos");
+    let _ = writeln!(w, "  prune            Remove expired/orphaned worktrees");
+    let _ = writeln!(w, "  destroy <name>   Remove a worktree set");
+    let _ = writeln!(w);
+    let _ = writeln!(w, "CREATE OPTIONS:");
+    let _ = writeln!(w, "  --repo <alias>[:<branch>]   Add specific repo(s)");
+    let _ = writeln!(w, "  --all                       Add all repos");
+    let _ = writeln!(w, "  --branch <name>             Override default branch name");
+    let _ = writeln!(w, "  --from-ref <ref>            Start from a specific tag/SHA");
+    let _ = writeln!(w, "  --from-pr <owner/repo#N>    Start from a PR's head branch");
+    let _ = writeln!(w, "  --ephemeral                 Mark for automatic cleanup");
+    let _ = writeln!(w, "  --ttl <duration>            Time-to-live (30s, 5m, 1h, 2d, 1w)");
+    let _ = writeln!(w, "  --meta <key=value>          Store custom metadata");
+    let _ = writeln!(w);
+    let _ = writeln!(w, "EXEC OPTIONS:");
+    let _ = writeln!(w, "  --ephemeral                 Atomic create+exec+destroy");
+    let _ = writeln!(w, "  --include <repos>           Only run in specified repos");
+    let _ = writeln!(w, "  --exclude <repos>           Skip specified repos");
+    let _ = writeln!(w, "  --parallel                  Run commands in parallel");
+    let _ = writeln!(w);
+    let _ = writeln!(w, "PRUNE OPTIONS:");
+    let _ = writeln!(w, "  --dry-run                   Preview without removing");
+    let _ = writeln!(w, "  --json                      Structured output");
+    let _ = writeln!(w);
+    let _ = writeln!(w, "DESTROY OPTIONS:");
+    let _ = writeln!(w, "  --force                     Remove even with uncommitted changes");
+    let _ = writeln!(w, "  --json                      Structured output");
+    let _ = writeln!(w);
+    let _ = writeln!(w, "EXAMPLES:");
+    let _ = writeln!(w, "  meta worktree create auth-fix --repo core --repo meta_cli");
+    let _ = writeln!(w, "  meta worktree create full-task --all");
+    let _ = writeln!(w, "  meta worktree create ci-check --all --ephemeral --ttl 1h --meta agent=ci");
+    let _ = writeln!(w, "  meta worktree create review --from-pr org/api#42 --repo api");
+    let _ = writeln!(w, "  meta worktree exec auth-fix -- cargo test");
+    let _ = writeln!(w, "  meta worktree exec --ephemeral lint --all -- make lint");
+    let _ = writeln!(w, "  meta worktree prune --dry-run");
+    let _ = writeln!(w, "  meta worktree diff auth-fix --base develop");
+    let _ = writeln!(w, "  meta worktree destroy auth-fix");
+}
+
+/// Print help to stdout (for --help flag).
 fn print_help() {
-    println!("meta worktree - Multi-repo worktree management");
-    println!();
-    println!("{}:", "USAGE".bold());
-    println!("  meta worktree <command> [options]");
-    println!();
-    println!("{}:", "COMMANDS".bold());
-    println!("  create <name>    Create a new worktree set");
-    println!("  add <name>       Add a repo to an existing worktree set");
-    println!("  list             List all worktree sets");
-    println!("  status <name>    Show detailed status of a worktree set");
-    println!("  diff <name>      Show cross-repo diff vs base branch");
-    println!("  exec <name>      Run a command across worktree repos");
-    println!("  prune            Remove expired/orphaned worktrees");
-    println!("  destroy <name>   Remove a worktree set");
-    println!();
-    println!("{}:", "CREATE OPTIONS".bold());
-    println!("  --repo <alias>[:<branch>]   Add specific repo(s)");
-    println!("  --all                       Add all repos");
-    println!("  --branch <name>             Override default branch name");
-    println!("  --from-ref <ref>            Start from a specific tag/SHA");
-    println!("  --from-pr <owner/repo#N>    Start from a PR's head branch");
-    println!("  --ephemeral                 Mark for automatic cleanup");
-    println!("  --ttl <duration>            Time-to-live (30s, 5m, 1h, 2d, 1w)");
-    println!("  --meta <key=value>          Store custom metadata");
-    println!();
-    println!("{}:", "EXEC OPTIONS".bold());
-    println!("  --ephemeral                 Atomic create+exec+destroy");
-    println!("  --include <repos>           Only run in specified repos");
-    println!("  --exclude <repos>           Skip specified repos");
-    println!("  --parallel                  Run commands in parallel");
-    println!();
-    println!("{}:", "PRUNE OPTIONS".bold());
-    println!("  --dry-run                   Preview without removing");
-    println!("  --json                      Structured output");
-    println!();
-    println!("{}:", "DESTROY OPTIONS".bold());
-    println!("  --force                     Remove even with uncommitted changes");
-    println!("  --json                      Structured output");
-    println!();
-    println!("{}:", "EXAMPLES".bold());
-    println!("  meta worktree create auth-fix --repo core --repo meta_cli");
-    println!("  meta worktree create full-task --all");
-    println!("  meta worktree create ci-check --all --ephemeral --ttl 1h --meta agent=ci");
-    println!("  meta worktree create review --from-pr org/api#42 --repo api");
-    println!("  meta worktree exec auth-fix -- cargo test");
-    println!("  meta worktree exec --ephemeral lint --all -- make lint");
-    println!("  meta worktree prune --dry-run");
-    println!("  meta worktree diff auth-fix --base develop");
-    println!("  meta worktree destroy auth-fix");
+    write_help(&mut std::io::stdout());
+}
+
+/// Print help to stderr (for error cases).
+fn eprint_help() {
+    write_help(&mut std::io::stderr());
 }
 
 // ==================== Helpers ====================

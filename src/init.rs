@@ -6,6 +6,7 @@
 use anyhow::{Context, Result};
 use colored::*;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 /// Embedded skill files from the meta repository
@@ -13,6 +14,7 @@ const SKILL_META_WORKSPACE: &str = include_str!("../../.claude/skills/meta-works
 const SKILL_META_GIT: &str = include_str!("../../.claude/skills/meta-git.md");
 const SKILL_META_EXEC: &str = include_str!("../../.claude/skills/meta-exec.md");
 const SKILL_META_PLUGINS: &str = include_str!("../../.claude/skills/meta-plugins.md");
+const SKILL_META_WORKTREE: &str = include_str!("../../.claude/skills/meta-worktree.md");
 
 /// All available skills with their filenames
 const SKILLS: &[(&str, &str)] = &[
@@ -20,6 +22,7 @@ const SKILLS: &[(&str, &str)] = &[
     ("meta-git.md", SKILL_META_GIT),
     ("meta-exec.md", SKILL_META_EXEC),
     ("meta-plugins.md", SKILL_META_PLUGINS),
+    ("meta-worktree.md", SKILL_META_WORKTREE),
 ];
 
 /// Handle the `meta init` subcommand
@@ -39,28 +42,41 @@ pub fn handle_init_command(args: &[String], verbose: bool) -> Result<()> {
             Ok(())
         }
         other => {
-            eprintln!("Unknown init command: {other}");
-            eprintln!("Run 'meta init --help' for usage.");
+            eprintln!("{}: unrecognized init command '{}'", "error".red().bold(), other);
+            eprintln!();
+            // Print the actual help text to stderr (not a reference to --help)
+            eprint_init_help();
             std::process::exit(1);
         }
     }
 }
 
+/// Write help text to a writer (supports both stdout and stderr).
+fn write_init_help(w: &mut dyn Write) {
+    let _ = writeln!(w, "meta init - Initialize meta integrations");
+    let _ = writeln!(w);
+    let _ = writeln!(w, "USAGE:");
+    let _ = writeln!(w, "    meta init <command>");
+    let _ = writeln!(w);
+    let _ = writeln!(w, "COMMANDS:");
+    let _ = writeln!(w, "    claude    Install Claude Code skills for this meta repo");
+    let _ = writeln!(w);
+    let _ = writeln!(w, "OPTIONS:");
+    let _ = writeln!(w, "    -f, --force    Overwrite existing skill files");
+    let _ = writeln!(w);
+    let _ = writeln!(w, "EXAMPLES:");
+    let _ = writeln!(w, "    meta init claude           Install Claude skills");
+    let _ = writeln!(w, "    meta init claude --force   Overwrite existing skills");
+}
+
+/// Print help to stdout (for --help flag).
 fn print_init_help() {
-    println!("meta init - Initialize meta integrations");
-    println!();
-    println!("USAGE:");
-    println!("    meta init <command>");
-    println!();
-    println!("COMMANDS:");
-    println!("    claude    Install Claude Code skills for this meta repo");
-    println!();
-    println!("OPTIONS:");
-    println!("    -f, --force    Overwrite existing skill files");
-    println!();
-    println!("EXAMPLES:");
-    println!("    meta init claude           Install Claude skills");
-    println!("    meta init claude --force   Overwrite existing skills");
+    write_init_help(&mut std::io::stdout());
+}
+
+/// Print help to stderr (for error cases).
+fn eprint_init_help() {
+    write_init_help(&mut std::io::stderr());
 }
 
 /// Install Claude Code skill files into .claude/skills/

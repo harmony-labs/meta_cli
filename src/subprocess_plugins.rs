@@ -217,10 +217,15 @@ impl SubprocessPluginManager {
                         best_match_len = cmd_len;
                     }
                 }
-                // Also check single-word match for fallback (e.g., "git" matches "git status")
-                else if plugin_cmd == cmd_parts[0] && best_match_len == 0 {
-                    best_match = Some((plugin, plugin_cmd));
-                    best_match_len = 1;
+                // Also check if the first word of plugin command matches first word of input
+                // This allows "project blablabla" to route to the project plugin
+                else if best_match_len == 0 {
+                    let plugin_cmd_first = plugin_cmd.split_whitespace().next().unwrap_or("");
+                    if plugin_cmd_first == cmd_parts[0] {
+                        // Use the full input command (plugin will handle unknown subcommand)
+                        best_match = Some((plugin, command));
+                        best_match_len = 1;
+                    }
                 }
             }
         }
@@ -281,7 +286,8 @@ impl SubprocessPluginManager {
         let output = child.wait_with_output()?;
 
         if !output.status.success() {
-            anyhow::bail!("Plugin {} exited with status {}", plugin.info.name, output.status);
+            // Plugin already printed its error to stderr, just propagate the exit code
+            std::process::exit(output.status.code().unwrap_or(1));
         }
 
         // Try to parse the response as JSON

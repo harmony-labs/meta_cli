@@ -3,6 +3,7 @@ use clap::{CommandFactory, Parser};
 use colored::*;
 use loop_lib::run;
 use meta_cli::config::{self, find_meta_config, parse_meta_config, MetaTreeNode, ProjectInfo};
+use std::io::Write;
 use std::path::PathBuf;
 
 mod init;
@@ -11,6 +12,18 @@ mod subprocess_plugins;
 mod worktree;
 
 use subprocess_plugins::{PluginRequestOptions, SubprocessPluginManager};
+
+/// Print help text and installed plugins to stdout or stderr.
+/// Use `to_stderr: true` for error cases where help is shown due to an invalid command.
+fn print_help_with_plugins(plugins: &SubprocessPluginManager, to_stderr: bool) {
+    if to_stderr {
+        let _ = Cli::command().write_help(&mut std::io::stderr());
+        eprint_installed_plugins(plugins);
+    } else {
+        let _ = Cli::command().print_help();
+        print_installed_plugins(plugins);
+    }
+}
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -81,8 +94,7 @@ fn main() -> Result<()> {
     subprocess_plugins.discover_plugins(cli.verbose)?;
 
     if cli.command.is_empty() {
-        Cli::command().print_help()?;
-        print_installed_plugins(&subprocess_plugins);
+        print_help_with_plugins(&subprocess_plugins, false);
         std::process::exit(0);
     }
 
@@ -294,8 +306,11 @@ fn main() -> Result<()> {
         }
     }
 
+    // Track whether user explicitly typed "exec" (required for arbitrary command execution)
+    let is_explicit_exec = cleaned_command.first().map(|s| s.as_str()) == Some("exec");
+
     // Strip leading "exec" and "--" from the command (they are meta syntax, not part of the user command)
-    if cleaned_command.first().map(|s| s.as_str()) == Some("exec") {
+    if is_explicit_exec {
         cleaned_command.remove(0);
     }
     if cleaned_command.first().map(|s| s.as_str()) == Some("--") {
@@ -303,7 +318,11 @@ fn main() -> Result<()> {
     }
 
     if cleaned_command.is_empty() {
-        eprintln!("Usage: meta exec -- <command> [args...]");
+        if is_explicit_exec {
+            eprintln!("Usage: meta exec <command> [args...]");
+        } else {
+            print_help_with_plugins(&subprocess_plugins, true);
+        }
         std::process::exit(1);
     }
 
@@ -405,15 +424,27 @@ fn main() -> Result<()> {
             );
         }
         // Do nothing, plugin already handled or skipped
-    } else {
-        log::info!("No plugin handled command, falling back to loop");
+    } else if is_explicit_exec {
+        // User explicitly requested exec, run the command in all repos
+        log::info!("Explicit exec requested, running command via loop");
         if cli.verbose {
             println!(
                 "{}",
-                "No plugin handled command, falling back to loop.".yellow()
+                "Running command via loop (explicit exec).".green()
             );
         }
         run(&config, &command_str)?;
+    } else {
+        // Unrecognized command - show actual help text so LLMs can self-correct
+        let first_cmd = cleaned_command.first().map(|s| s.as_str()).unwrap_or("");
+        eprintln!("{}: unrecognized command '{}'", "error".red().bold(), first_cmd);
+        eprintln!();
+        eprintln!("To run '{}' across all repos:", command_str);
+        eprintln!("    meta exec {}", command_str);
+        eprintln!();
+        // Print the actual help text to stderr (not a reference to --help)
+        print_help_with_plugins(&subprocess_plugins, true);
+        std::process::exit(1);
     }
 
     Ok(())
@@ -551,18 +582,28 @@ fn handle_plugin_command(args: &[String], verbose: bool, json: bool) -> Result<(
     Ok(())
 }
 
-/// Print list of installed plugins for --help output
-fn print_installed_plugins(plugins: &SubprocessPluginManager) {
+/// Write list of installed plugins to a writer.
+fn write_installed_plugins(plugins: &SubprocessPluginManager, w: &mut dyn Write) {
     let plugin_list = plugins.list_plugins();
     if !plugin_list.is_empty() {
-        println!();
-        println!("INSTALLED PLUGINS:");
+        let _ = writeln!(w);
+        let _ = writeln!(w, "INSTALLED PLUGINS:");
         for (name, version, description) in plugin_list {
-            println!("    {name:<12} v{version:<8} {description}");
+            let _ = writeln!(w, "    {name:<12} v{version:<8} {description}");
         }
-        println!();
-        println!("Run 'meta <plugin> --help' for plugin-specific help.");
+        let _ = writeln!(w);
+        let _ = writeln!(w, "Run 'meta <plugin> --help' for plugin-specific help.");
     }
+}
+
+/// Print list of installed plugins for --help output (stdout)
+fn print_installed_plugins(plugins: &SubprocessPluginManager) {
+    write_installed_plugins(plugins, &mut std::io::stdout());
+}
+
+/// Print list of installed plugins to stderr (for error cases)
+fn eprint_installed_plugins(plugins: &SubprocessPluginManager) {
+    write_installed_plugins(plugins, &mut std::io::stderr());
 }
 
 #[cfg(test)]
