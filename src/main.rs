@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{CommandFactory, Parser};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use colored::*;
 use loop_lib::run;
 use meta_cli::config::{self, find_meta_config, parse_meta_config, MetaTreeNode, ProjectInfo};
@@ -13,6 +13,171 @@ mod worktree;
 
 use subprocess_plugins::{PluginRequestOptions, SubprocessPluginManager};
 
+// === CLI Structs ===
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    #[arg(
+        long,
+        global = true,
+        help = "Add shell aliases to the global .looprc file"
+    )]
+    add_aliases_to_global_looprc: bool,
+
+    #[arg(short, long, global = true, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    #[arg(
+        short,
+        long,
+        global = true,
+        value_delimiter = ',',
+        help = "Specify directories to exclude"
+    )]
+    exclude: Option<Vec<String>>,
+
+    #[arg(
+        short,
+        long,
+        global = true,
+        value_delimiter = ',',
+        help = "Specify directories to include"
+    )]
+    include: Option<Vec<String>>,
+
+    #[arg(long, global = true, help = "Output results in JSON format")]
+    json: bool,
+
+    #[arg(short, long, global = true, help = "Enable silent mode")]
+    silent: bool,
+
+    #[arg(short, long, action, global = true, help = "Enable verbose output")]
+    verbose: bool,
+
+    #[arg(
+        long,
+        short = 't',
+        global = true,
+        value_name = "TAGS",
+        help = "Filter projects by tag(s), comma-separated"
+    )]
+    tag: Option<String>,
+
+    #[arg(
+        long,
+        short = 'r',
+        global = true,
+        help = "Recursively process nested meta repos"
+    )]
+    recursive: bool,
+
+    #[arg(
+        long,
+        global = true,
+        value_name = "N",
+        help = "Maximum depth for recursive processing (default: unlimited)"
+    )]
+    depth: Option<usize>,
+
+    #[arg(
+        long,
+        global = true,
+        help = "Show what commands would be run without executing them"
+    )]
+    dry_run: bool,
+
+    #[arg(long, global = true, help = "Run commands in parallel")]
+    parallel: bool,
+
+    #[arg(
+        long,
+        global = true,
+        help = "Use primary checkout paths, overriding worktree context detection"
+    )]
+    primary: bool,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Execute a command across all repos
+    Exec(ExecArgs),
+    /// Initialize meta integrations
+    Init(InitArgs),
+    /// Manage plugins
+    Plugin(PluginArgs),
+    /// Manage git worktrees across repos
+    Worktree(WorktreeArgs),
+    #[command(external_subcommand)]
+    External(Vec<String>),
+}
+
+/// Arguments for `meta exec`
+#[derive(Args)]
+struct ExecArgs {
+    /// Command and arguments to execute (use -- to separate from meta flags)
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    command: Vec<String>,
+}
+
+/// Arguments for `meta init`
+#[derive(Args)]
+struct InitArgs {
+    #[command(subcommand)]
+    command: Option<InitCommands>,
+}
+
+#[derive(Subcommand)]
+enum InitCommands {
+    /// Install Claude Code skills for this meta repo
+    Claude {
+        /// Overwrite existing skill files
+        #[arg(short, long)]
+        force: bool,
+    },
+}
+
+/// Arguments for `meta plugin`
+#[derive(Args)]
+struct PluginArgs {
+    #[command(subcommand)]
+    command: Option<PluginCommands>,
+}
+
+#[derive(Subcommand)]
+enum PluginCommands {
+    /// Search for plugins in the registry
+    Search {
+        /// Search query
+        query: String,
+    },
+    /// Install a plugin from the registry
+    Install {
+        /// Plugin name
+        name: String,
+    },
+    /// List installed plugins
+    List,
+    /// Uninstall a plugin
+    Uninstall {
+        /// Plugin name
+        name: String,
+    },
+}
+
+/// Arguments for `meta worktree` (passthrough to worktree subsystem)
+#[derive(Args)]
+struct WorktreeArgs {
+    /// Arguments passed to the worktree subsystem
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
+}
+
+// === Help Utilities ===
+
 /// Print help text and installed plugins to stdout or stderr.
 /// Use `to_stderr: true` for error cases where help is shown due to an invalid command.
 fn print_help_with_plugins(plugins: &SubprocessPluginManager, to_stderr: bool) {
@@ -25,62 +190,36 @@ fn print_help_with_plugins(plugins: &SubprocessPluginManager, to_stderr: bool) {
     }
 }
 
-#[derive(Parser)]
-#[command(author, version, about, long_about = None)]
-struct Cli {
-    #[arg(long, help = "Add shell aliases to the global .looprc file")]
-    add_aliases_to_global_looprc: bool,
-
-    #[arg(trailing_var_arg = true)]
-    command: Vec<String>,
-
-    #[arg(short, long, value_name = "FILE")]
-    config: Option<PathBuf>,
-
-    #[arg(short, long, help = "Specify directories to exclude")]
-    exclude: Option<Vec<String>>,
-
-    #[arg(short, long, help = "Specify directories to include")]
-    include: Option<Vec<String>>,
-
-    #[arg(long, help = "Output results in JSON format")]
-    json: bool,
-
-    #[arg(short, long, help = "Enable silent mode")]
-    silent: bool,
-
-    #[arg(short, long, action, help = "Enable verbose output")]
-    verbose: bool,
-
-    #[arg(
-        long,
-        short = 't',
-        value_name = "TAGS",
-        help = "Filter projects by tag(s), comma-separated"
-    )]
-    tag: Option<String>,
-
-    #[arg(long, short = 'r', help = "Recursively process nested meta repos")]
-    recursive: bool,
-
-    #[arg(
-        long,
-        value_name = "N",
-        help = "Maximum depth for recursive processing (default: unlimited)"
-    )]
-    depth: Option<usize>,
-
-    #[arg(long, help = "Show what commands would be run without executing them")]
-    dry_run: bool,
-
-    #[arg(long, help = "Use primary checkout paths, overriding worktree context detection")]
-    primary: bool,
+/// Write list of installed plugins to a writer.
+fn write_installed_plugins(plugins: &SubprocessPluginManager, w: &mut dyn Write) {
+    let plugin_list = plugins.list_plugins();
+    if !plugin_list.is_empty() {
+        let _ = writeln!(w);
+        let _ = writeln!(w, "INSTALLED PLUGINS:");
+        for (name, version, description) in plugin_list {
+            let _ = writeln!(w, "    {name:<12} v{version:<8} {description}");
+        }
+        let _ = writeln!(w);
+        let _ = writeln!(w, "Run 'meta <plugin> --help' for plugin-specific help.");
+    }
 }
+
+/// Print list of installed plugins for --help output (stdout)
+fn print_installed_plugins(plugins: &SubprocessPluginManager) {
+    write_installed_plugins(plugins, &mut std::io::stdout());
+}
+
+/// Print list of installed plugins to stderr (for error cases)
+fn eprint_installed_plugins(plugins: &SubprocessPluginManager) {
+    write_installed_plugins(plugins, &mut std::io::stderr());
+}
+
+// === Main Entry Point ===
 
 fn main() -> Result<()> {
     env_logger::init();
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
 
     log::debug!("cli.json = {}", cli.json);
 
@@ -88,58 +227,220 @@ fn main() -> Result<()> {
     let mut subprocess_plugins = SubprocessPluginManager::new();
     subprocess_plugins.discover_plugins(cli.verbose)?;
 
-    if cli.command.is_empty() {
-        print_help_with_plugins(&subprocess_plugins, false);
-        std::process::exit(0);
+    // Take command out so we can move subcommand args while still borrowing cli
+    let command = cli.command.take();
+    match command {
+        None => {
+            print_help_with_plugins(&subprocess_plugins, false);
+            std::process::exit(0);
+        }
+        Some(Commands::Init(args)) => handle_init(args, cli.verbose),
+        Some(Commands::Plugin(args)) => handle_plugin(args, cli.verbose, cli.json),
+        Some(Commands::Worktree(args)) => {
+            worktree::handle_worktree_command(&args.args, cli.verbose, cli.json)
+        }
+        Some(Commands::Exec(args)) => {
+            handle_command_dispatch(args.command, &cli, &subprocess_plugins, true)
+        }
+        Some(Commands::External(args)) => {
+            // Check for plugin help or bare plugin command first
+            if let Some(first) = args.first() {
+                let wants_help = args.iter().any(|a| a == "--help" || a == "-h");
+                let is_bare = args.len() == 1;
+                if wants_help || is_bare {
+                    if let Some(help_text) = subprocess_plugins.get_plugin_help(first) {
+                        println!("{help_text}");
+                        return Ok(());
+                    }
+                }
+            }
+            handle_command_dispatch(args, &cli, &subprocess_plugins, false)
+        }
     }
+}
 
-    // Check if user wants plugin help (e.g., "meta git --help" or "meta git -h")
-    // Also show help if command is just a plugin name with no subcommand (e.g., "meta git" or "meta project")
-    if let Some(first_arg) = cli.command.first() {
-        let wants_help = cli.command.iter().any(|arg| arg == "--help" || arg == "-h");
-        let is_bare_plugin_command = cli.command.len() == 1;
+// === Subcommand Handlers ===
 
-        if wants_help || is_bare_plugin_command {
-            // Check if this is a plugin command
-            if let Some(help_text) = subprocess_plugins.get_plugin_help(first_arg) {
-                println!("{help_text}");
-                return Ok(());
+fn handle_init(args: InitArgs, verbose: bool) -> Result<()> {
+    match args.command {
+        None => init::handle_init_command(&[], verbose),
+        Some(InitCommands::Claude { force }) => {
+            let mut a = vec!["claude".to_string()];
+            if force {
+                a.push("--force".to_string());
+            }
+            init::handle_init_command(&a, verbose)
+        }
+    }
+}
+
+fn handle_plugin(args: PluginArgs, verbose: bool, json: bool) -> Result<()> {
+    match args.command {
+        None => handle_plugin_command(&[], verbose, json),
+        Some(cmd) => {
+            let a: Vec<String> = match cmd {
+                PluginCommands::Search { query } => vec!["search".into(), query],
+                PluginCommands::Install { name } => vec!["install".into(), name],
+                PluginCommands::List => vec!["list".into()],
+                PluginCommands::Uninstall { name } => vec!["uninstall".into(), name],
+            };
+            handle_plugin_command(&a, verbose, json)
+        }
+    }
+}
+
+// === Command Dispatch (shared by exec and external) ===
+
+/// Meta flags extracted from command args (backward compatibility).
+///
+/// When users place meta flags after the command (e.g., `meta exec -- pwd --include api`),
+/// we extract them from the command vec for backward compatibility.
+struct ExtractedFlags {
+    include_filters: Vec<String>,
+    exclude_filters: Vec<String>,
+    parallel: bool,
+    recursive: bool,
+    dry_run: bool,
+    depth: Option<usize>,
+    cleaned_command: Vec<String>,
+}
+
+/// Extract meta-specific flags from a command argument list.
+///
+/// This handles backward-compatible flag placement where meta flags appear
+/// after the user command (e.g., `meta exec -- pwd --include api`).
+fn extract_meta_flags(args: &[String]) -> ExtractedFlags {
+    let mut include_filters = Vec::new();
+    let mut exclude_filters = Vec::new();
+    let mut parallel = false;
+    let mut recursive = false;
+    let mut dry_run = false;
+    let mut depth = None;
+    let mut cleaned = Vec::new();
+
+    let mut idx = 0;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--include" => {
+                idx += 1;
+                while idx < args.len() && !args[idx].starts_with("--") {
+                    let parts = args[idx]
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    include_filters.extend(parts);
+                    idx += 1;
+                }
+            }
+            "--exclude" => {
+                idx += 1;
+                while idx < args.len() && !args[idx].starts_with("--") {
+                    let parts = args[idx]
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    exclude_filters.extend(parts);
+                    idx += 1;
+                }
+            }
+            "--parallel" => {
+                parallel = true;
+                idx += 1;
+            }
+            "--recursive" | "-r" => {
+                recursive = true;
+                idx += 1;
+            }
+            "--dry-run" => {
+                dry_run = true;
+                idx += 1;
+            }
+            "--depth" => {
+                idx += 1;
+                if idx < args.len() {
+                    if let Ok(d) = args[idx].parse::<usize>() {
+                        depth = Some(d);
+                    }
+                    idx += 1;
+                }
+            }
+            _ => {
+                cleaned.push(args[idx].clone());
+                idx += 1;
             }
         }
     }
 
-    // Handle plugin management commands (don't require .meta file)
-    if cli.command.first().map(|s| s.as_str()) == Some("plugin") {
-        return handle_plugin_command(&cli.command[1..], cli.verbose, cli.json);
+    ExtractedFlags {
+        include_filters,
+        exclude_filters,
+        parallel,
+        recursive,
+        dry_run,
+        depth,
+        cleaned_command: cleaned,
+    }
+}
+
+/// Dispatch a command to plugins or loop execution.
+///
+/// Used by both `meta exec` (is_explicit_exec=true) and external subcommands
+/// (is_explicit_exec=false).
+fn handle_command_dispatch(
+    raw_args: Vec<String>,
+    cli: &Cli,
+    plugins: &SubprocessPluginManager,
+    is_explicit_exec: bool,
+) -> Result<()> {
+    // Extract meta flags embedded in the command args (backward compatibility)
+    let extracted = extract_meta_flags(&raw_args);
+    let cleaned_command = extracted.cleaned_command;
+
+    if cleaned_command.is_empty() {
+        if is_explicit_exec {
+            eprintln!("Usage: meta exec <command> [args...]");
+        } else {
+            print_help_with_plugins(plugins, true);
+        }
+        std::process::exit(1);
     }
 
-    // Handle init commands (don't require .meta file)
-    if cli.command.first().map(|s| s.as_str()) == Some("init") {
-        return init::handle_init_command(&cli.command[1..], cli.verbose);
+    // Merge clap-level flags with flags extracted from command args
+    let mut include_filters = extracted.include_filters;
+    let mut exclude_filters = extracted.exclude_filters;
+    if let Some(ref clap_includes) = cli.include {
+        include_filters.extend(clap_includes.iter().cloned());
     }
-
-    // Handle worktree commands (some subcommands don't require .meta file)
-    if cli.command.first().map(|s| s.as_str()) == Some("worktree") {
-        return worktree::handle_worktree_command(&cli.command[1..], cli.verbose, cli.json);
+    if let Some(ref clap_excludes) = cli.exclude {
+        exclude_filters.extend(clap_excludes.iter().cloned());
     }
+    let recursive = cli.recursive || extracted.recursive;
+    let dry_run = cli.dry_run || extracted.dry_run;
+    let depth = extracted.depth.or(cli.depth);
+    let parallel = cli.parallel || extracted.parallel;
 
-    let command_str = cli.command.join(" ");
+    let command_str = cleaned_command.join(" ");
 
     // Check if this is `git clone` - it doesn't require a .meta file because
     // its purpose is to clone the repo that contains the .meta file
-    let is_git_clone_bootstrap = cli.command.first().map(|s| s == "git").unwrap_or(false)
-        && cli.command.get(1).map(|s| s == "clone").unwrap_or(false);
+    let is_git_clone = cleaned_command
+        .first()
+        .map(|s| s == "git")
+        .unwrap_or(false)
+        && cleaned_command
+            .get(1)
+            .map(|s| s == "clone")
+            .unwrap_or(false);
 
-    if is_git_clone_bootstrap {
+    if is_git_clone {
         // Handle git clone directly via plugin without requiring .meta file
-        // Build args: everything after "git clone" (i.e., URL and other git options)
-        let clone_args: Vec<String> = cli.command.iter().skip(2).cloned().collect();
+        let clone_args: Vec<String> = cleaned_command.iter().skip(2).cloned().collect();
 
         let subprocess_options = PluginRequestOptions {
             json_output: cli.json,
             verbose: cli.verbose,
             parallel: false,
-            dry_run: cli.dry_run,
+            dry_run,
             silent: cli.silent,
             recursive: false,
             depth: None,
@@ -147,8 +448,7 @@ fn main() -> Result<()> {
             exclude_filters: None,
         };
 
-        // Pass "git clone" as command, and the URL/options as args
-        if subprocess_plugins.execute("git clone", &clone_args, &[], subprocess_options)? {
+        if plugins.execute("git clone", &clone_args, &[], subprocess_options)? {
             if cli.verbose {
                 println!("{}", "Git clone handled by subprocess plugin.".green());
             }
@@ -177,15 +477,26 @@ fn main() -> Result<()> {
                 .map(|p| p.display().to_string())
                 .collect();
 
+            let include_opt = if include_filters.is_empty() {
+                None
+            } else {
+                Some(include_filters)
+            };
+            let exclude_opt = if exclude_filters.is_empty() {
+                None
+            } else {
+                Some(exclude_filters)
+            };
+
             let config = loop_lib::LoopConfig {
                 directories,
                 ignore: vec![],
-                include_filters: cli.include.clone(),
-                exclude_filters: cli.exclude.clone(),
+                include_filters: include_opt,
+                exclude_filters: exclude_opt,
                 verbose: cli.verbose,
                 silent: cli.silent,
                 parallel: false,
-                dry_run: cli.dry_run,
+                dry_run,
                 json_output: cli.json,
                 add_aliases_to_global_looprc: false,
                 spawn_stagger_ms: 0,
@@ -237,103 +548,6 @@ fn main() -> Result<()> {
         meta_projects.iter().collect()
     };
 
-    // Parse CLI filtering options from command args FIRST
-    // Note: When using trailing_var_arg, meta's own flags (--recursive, --dry-run, etc.)
-    // may end up in the command args if placed after the command. We need to extract them.
-    let mut include_filters: Vec<String> = vec![];
-    let mut exclude_filters: Vec<String> = vec![];
-    let mut parallel = false;
-    let mut recursive_from_args = false;
-    let mut dry_run_from_args = false;
-    let mut depth_from_args: Option<usize> = None;
-    let mut cleaned_command = vec![];
-
-    let mut idx = 0;
-    while idx < cli.command.len() {
-        match cli.command[idx].as_str() {
-            "--include" => {
-                idx += 1;
-                while idx < cli.command.len() && !cli.command[idx].starts_with("--") {
-                    let parts = cli.command[idx]
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty());
-                    include_filters.extend(parts);
-                    idx += 1;
-                }
-            }
-            "--exclude" => {
-                idx += 1;
-                while idx < cli.command.len() && !cli.command[idx].starts_with("--") {
-                    let parts = cli.command[idx]
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty());
-                    exclude_filters.extend(parts);
-                    idx += 1;
-                }
-            }
-            "--parallel" => {
-                parallel = true;
-                idx += 1;
-            }
-            "--recursive" | "-r" => {
-                recursive_from_args = true;
-                idx += 1;
-            }
-            "--dry-run" => {
-                dry_run_from_args = true;
-                idx += 1;
-            }
-            "--depth" => {
-                idx += 1;
-                if idx < cli.command.len() {
-                    if let Ok(d) = cli.command[idx].parse::<usize>() {
-                        depth_from_args = Some(d);
-                    }
-                    idx += 1;
-                }
-            }
-            arg => {
-                cleaned_command.push(arg.to_string());
-                idx += 1;
-            }
-        }
-    }
-
-    // Track whether user explicitly typed "exec" (required for arbitrary command execution)
-    let is_explicit_exec = cleaned_command.first().map(|s| s.as_str()) == Some("exec");
-
-    // Strip leading "exec" and "--" from the command (they are meta syntax, not part of the user command)
-    if is_explicit_exec {
-        cleaned_command.remove(0);
-    }
-    if cleaned_command.first().map(|s| s.as_str()) == Some("--") {
-        cleaned_command.remove(0);
-    }
-
-    if cleaned_command.is_empty() {
-        if is_explicit_exec {
-            eprintln!("Usage: meta exec <command> [args...]");
-        } else {
-            print_help_with_plugins(&subprocess_plugins, true);
-        }
-        std::process::exit(1);
-    }
-
-    // Merge clap-level --include/--exclude with trailing-arg-parsed filters
-    if let Some(ref clap_includes) = cli.include {
-        include_filters.extend(clap_includes.iter().cloned());
-    }
-    if let Some(ref clap_excludes) = cli.exclude {
-        exclude_filters.extend(clap_excludes.iter().cloned());
-    }
-
-    // Merge flags parsed from args with those parsed by clap
-    let recursive = cli.recursive || recursive_from_args;
-    let dry_run = cli.dry_run || dry_run_from_args;
-    let depth = depth_from_args.or(cli.depth);
-
     let mut project_paths = vec![".".to_string()];
     project_paths.extend(
         filtered_projects
@@ -347,7 +561,7 @@ fn main() -> Result<()> {
             let depth_str = depth.map_or("unlimited".to_string(), |d| d.to_string());
             println!("Recursive mode enabled, max depth: {}", depth_str);
         }
-        let tree = config::walk_meta_tree(&meta_dir, depth)?;
+        let tree = config::walk_meta_tree(meta_dir, depth)?;
         project_paths = vec![".".to_string()];
         let flat = flatten_with_tag_filter(&tree, &cli.tag);
         project_paths.extend(
@@ -355,8 +569,6 @@ fn main() -> Result<()> {
                 .map(|p| meta_dir.join(p).to_string_lossy().to_string()),
         );
     }
-
-    let command_str = cleaned_command.join(" ");
 
     // Prepare filter options (shared by both LoopConfig and PluginRequestOptions)
     let include_opt = if include_filters.is_empty() {
@@ -384,9 +596,6 @@ fn main() -> Result<()> {
         spawn_stagger_ms: 0,
     };
 
-    let is_git_clone = cleaned_command.first().map(|s| s == "git").unwrap_or(false)
-        && cleaned_command.get(1).map(|s| s == "clone").unwrap_or(false);
-
     // Try subprocess plugins first (preferred)
     let subprocess_options = PluginRequestOptions {
         json_output: cli.json,
@@ -400,7 +609,7 @@ fn main() -> Result<()> {
         exclude_filters: exclude_opt,
     };
 
-    if subprocess_plugins.execute(
+    if plugins.execute(
         &command_str,
         &cleaned_command,
         &project_paths,
@@ -418,7 +627,6 @@ fn main() -> Result<()> {
                 "No plugin handled git clone, skipping loop fallback.".yellow()
             );
         }
-        // Do nothing, plugin already handled or skipped
     } else if is_explicit_exec {
         // User explicitly requested exec, run the command in all repos
         log::info!("Explicit exec requested, running command via loop");
@@ -432,54 +640,24 @@ fn main() -> Result<()> {
     } else {
         // Unrecognized command - show actual help text so LLMs can self-correct
         let first_cmd = cleaned_command.first().map(|s| s.as_str()).unwrap_or("");
-        eprintln!("{}: unrecognized command '{}'", "error".red().bold(), first_cmd);
+        eprintln!(
+            "{}: unrecognized command '{}'",
+            "error".red().bold(),
+            first_cmd
+        );
         eprintln!();
         eprintln!("To run '{}' across all repos:", command_str);
         eprintln!("    meta exec {}", command_str);
         eprintln!();
         // Print the actual help text to stderr (not a reference to --help)
-        print_help_with_plugins(&subprocess_plugins, true);
+        print_help_with_plugins(plugins, true);
         std::process::exit(1);
     }
 
     Ok(())
 }
 
-
-/// Flatten a meta tree into path strings, optionally filtering by tag.
-/// If tag_filter is Some, only includes nodes whose tags match (and recurses into them).
-fn flatten_with_tag_filter(nodes: &[MetaTreeNode], tag_filter: &Option<String>) -> Vec<String> {
-    let mut paths = Vec::new();
-    flatten_filtered_inner(nodes, tag_filter, "", &mut paths);
-    paths
-}
-
-fn flatten_filtered_inner(
-    nodes: &[MetaTreeNode],
-    tag_filter: &Option<String>,
-    prefix: &str,
-    paths: &mut Vec<String>,
-) {
-    for node in nodes {
-        let matches = match tag_filter {
-            Some(ref tag_str) => {
-                let requested: Vec<&str> = tag_str.split(',').map(|s| s.trim()).collect();
-                node.info.tags.iter().any(|t| requested.contains(&t.as_str()))
-            }
-            None => true,
-        };
-
-        if matches {
-            let full_path = if prefix.is_empty() {
-                node.info.path.clone()
-            } else {
-                format!("{}/{}", prefix, node.info.path)
-            };
-            paths.push(full_path.clone());
-            flatten_filtered_inner(&node.children, tag_filter, &full_path, paths);
-        }
-    }
-}
+// === Plugin Management ===
 
 /// Handle plugin management subcommands
 fn handle_plugin_command(args: &[String], verbose: bool, json: bool) -> Result<()> {
@@ -577,29 +755,44 @@ fn handle_plugin_command(args: &[String], verbose: bool, json: bool) -> Result<(
     Ok(())
 }
 
-/// Write list of installed plugins to a writer.
-fn write_installed_plugins(plugins: &SubprocessPluginManager, w: &mut dyn Write) {
-    let plugin_list = plugins.list_plugins();
-    if !plugin_list.is_empty() {
-        let _ = writeln!(w);
-        let _ = writeln!(w, "INSTALLED PLUGINS:");
-        for (name, version, description) in plugin_list {
-            let _ = writeln!(w, "    {name:<12} v{version:<8} {description}");
+// === Tree Utilities ===
+
+/// Flatten a meta tree into path strings, optionally filtering by tag.
+/// If tag_filter is Some, only includes nodes whose tags match (and recurses into them).
+fn flatten_with_tag_filter(nodes: &[MetaTreeNode], tag_filter: &Option<String>) -> Vec<String> {
+    let mut paths = Vec::new();
+    flatten_filtered_inner(nodes, tag_filter, "", &mut paths);
+    paths
+}
+
+fn flatten_filtered_inner(
+    nodes: &[MetaTreeNode],
+    tag_filter: &Option<String>,
+    prefix: &str,
+    paths: &mut Vec<String>,
+) {
+    for node in nodes {
+        let matches = match tag_filter {
+            Some(ref tag_str) => {
+                let requested: Vec<&str> = tag_str.split(',').map(|s| s.trim()).collect();
+                node.info.tags.iter().any(|t| requested.contains(&t.as_str()))
+            }
+            None => true,
+        };
+
+        if matches {
+            let full_path = if prefix.is_empty() {
+                node.info.path.clone()
+            } else {
+                format!("{}/{}", prefix, node.info.path)
+            };
+            paths.push(full_path.clone());
+            flatten_filtered_inner(&node.children, tag_filter, &full_path, paths);
         }
-        let _ = writeln!(w);
-        let _ = writeln!(w, "Run 'meta <plugin> --help' for plugin-specific help.");
     }
 }
 
-/// Print list of installed plugins for --help output (stdout)
-fn print_installed_plugins(plugins: &SubprocessPluginManager) {
-    write_installed_plugins(plugins, &mut std::io::stdout());
-}
-
-/// Print list of installed plugins to stderr (for error cases)
-fn eprint_installed_plugins(plugins: &SubprocessPluginManager) {
-    write_installed_plugins(plugins, &mut std::io::stderr());
-}
+// === Tests ===
 
 #[cfg(test)]
 mod tests {
