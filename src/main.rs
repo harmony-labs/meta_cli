@@ -234,8 +234,14 @@ fn main() -> Result<()> {
             print_help_with_plugins(&subprocess_plugins, false);
             std::process::exit(0);
         }
-        Some(Commands::Init(args)) => handle_init(args, cli.verbose),
-        Some(Commands::Plugin(args)) => handle_plugin(args, cli.verbose, cli.json),
+        Some(Commands::Init(args)) => {
+            let cmd = match args.command {
+                None => init::InitCommand::None,
+                Some(InitCommands::Claude { force }) => init::InitCommand::Claude { force },
+            };
+            init::handle_init_command(cmd, cli.verbose)
+        }
+        Some(Commands::Plugin(args)) => handle_plugin_command(args.command, cli.verbose, cli.json),
         Some(Commands::Worktree(args)) => {
             worktree::handle_worktree_command(&args.args, cli.verbose, cli.json)
         }
@@ -259,42 +265,16 @@ fn main() -> Result<()> {
     }
 }
 
-// === Subcommand Handlers ===
-
-fn handle_init(args: InitArgs, verbose: bool) -> Result<()> {
-    match args.command {
-        None => init::handle_init_command(&[], verbose),
-        Some(InitCommands::Claude { force }) => {
-            let mut a = vec!["claude".to_string()];
-            if force {
-                a.push("--force".to_string());
-            }
-            init::handle_init_command(&a, verbose)
-        }
-    }
-}
-
-fn handle_plugin(args: PluginArgs, verbose: bool, json: bool) -> Result<()> {
-    match args.command {
-        None => handle_plugin_command(&[], verbose, json),
-        Some(cmd) => {
-            let a: Vec<String> = match cmd {
-                PluginCommands::Search { query } => vec!["search".into(), query],
-                PluginCommands::Install { name } => vec!["install".into(), name],
-                PluginCommands::List => vec!["list".into()],
-                PluginCommands::Uninstall { name } => vec!["uninstall".into(), name],
-            };
-            handle_plugin_command(&a, verbose, json)
-        }
-    }
-}
-
 // === Command Dispatch (shared by exec and external) ===
 
 /// Meta flags extracted from command args (backward compatibility).
 ///
 /// When users place meta flags after the command (e.g., `meta exec -- pwd --include api`),
 /// we extract them from the command vec for backward compatibility.
+///
+/// **Deprecated:** Place meta flags before the subcommand instead:
+///   `meta --include foo exec pwd`   (preferred)
+///   `meta exec pwd --include foo`   (deprecated, still works)
 struct ExtractedFlags {
     include_filters: Vec<String>,
     exclude_filters: Vec<String>,
@@ -305,10 +285,25 @@ struct ExtractedFlags {
     cleaned_command: Vec<String>,
 }
 
+impl ExtractedFlags {
+    /// Returns true if any meta flags were extracted from trailing args.
+    fn has_trailing_flags(&self) -> bool {
+        !self.include_filters.is_empty()
+            || !self.exclude_filters.is_empty()
+            || self.parallel
+            || self.recursive
+            || self.dry_run
+            || self.depth.is_some()
+    }
+}
+
 /// Extract meta-specific flags from a command argument list.
 ///
 /// This handles backward-compatible flag placement where meta flags appear
 /// after the user command (e.g., `meta exec -- pwd --include api`).
+///
+/// **Deprecated:** This function exists for backward compatibility. Users should
+/// place meta flags before the subcommand (e.g., `meta --include foo exec pwd`).
 fn extract_meta_flags(args: &[String]) -> ExtractedFlags {
     let mut include_filters = Vec::new();
     let mut exclude_filters = Vec::new();
@@ -394,6 +389,14 @@ fn handle_command_dispatch(
 ) -> Result<()> {
     // Extract meta flags embedded in the command args (backward compatibility)
     let extracted = extract_meta_flags(&raw_args);
+    if extracted.has_trailing_flags() {
+        eprintln!(
+            "{} Placing meta flags after the command is deprecated.",
+            "warning:".yellow().bold(),
+        );
+        eprintln!("  Use: meta [flags] exec <command>");
+        eprintln!("  e.g. meta --include foo exec pwd");
+    }
     let cleaned_command = extracted.cleaned_command;
 
     if cleaned_command.is_empty() {
@@ -659,30 +662,28 @@ fn handle_command_dispatch(
 
 // === Plugin Management ===
 
-/// Handle plugin management subcommands
-fn handle_plugin_command(args: &[String], verbose: bool, json: bool) -> Result<()> {
+/// Handle plugin management subcommands with typed args.
+fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: bool) -> Result<()> {
     use registry::{PluginInstaller, RegistryClient};
 
-    if args.is_empty() {
-        println!("Usage: meta plugin <command>");
-        println!();
-        println!("Commands:");
-        println!("  search <query>   Search for plugins in the registry");
-        println!("  install <name>   Install a plugin from the registry");
-        println!("  list             List installed plugins");
-        println!("  uninstall <name> Uninstall a plugin");
-        return Ok(());
-    }
+    let command = match command {
+        Some(cmd) => cmd,
+        None => {
+            println!("Usage: meta plugin <command>");
+            println!();
+            println!("Commands:");
+            println!("  search <query>   Search for plugins in the registry");
+            println!("  install <name>   Install a plugin from the registry");
+            println!("  list             List installed plugins");
+            println!("  uninstall <name> Uninstall a plugin");
+            return Ok(());
+        }
+    };
 
-    let subcommand = &args[0];
-    match subcommand.as_str() {
-        "search" => {
-            if args.len() < 2 {
-                anyhow::bail!("Usage: meta plugin search <query>");
-            }
-            let query = &args[1];
+    match command {
+        PluginCommands::Search { query } => {
             let client = RegistryClient::new(verbose)?;
-            let results = client.search(query)?;
+            let results = client.search(&query)?;
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&results)?);
@@ -699,13 +700,9 @@ fn handle_plugin_command(args: &[String], verbose: bool, json: bool) -> Result<(
                 }
             }
         }
-        "install" => {
-            if args.len() < 2 {
-                anyhow::bail!("Usage: meta plugin install <name>");
-            }
-            let name = &args[1];
+        PluginCommands::Install { name } => {
             let client = RegistryClient::new(verbose)?;
-            let metadata = client.fetch_plugin_metadata(name)?;
+            let metadata = client.fetch_plugin_metadata(&name)?;
 
             let installer = PluginInstaller::new(verbose)?;
             installer.install(&metadata)?;
@@ -717,7 +714,7 @@ fn handle_plugin_command(args: &[String], verbose: bool, json: bool) -> Result<(
                 );
             }
         }
-        "list" => {
+        PluginCommands::List => {
             let installer = PluginInstaller::new(verbose)?;
             let plugins = installer.list_installed()?;
 
@@ -732,23 +729,13 @@ fn handle_plugin_command(args: &[String], verbose: bool, json: bool) -> Result<(
                 }
             }
         }
-        "uninstall" => {
-            if args.len() < 2 {
-                anyhow::bail!("Usage: meta plugin uninstall <name>");
-            }
-            let name = &args[1];
+        PluginCommands::Uninstall { name } => {
             let installer = PluginInstaller::new(verbose)?;
-            installer.uninstall(name)?;
+            installer.uninstall(&name)?;
 
             if !json {
                 println!("Successfully uninstalled {name}");
             }
-        }
-        _ => {
-            anyhow::bail!(
-                "Unknown plugin command: {}. Use 'meta plugin' for help.",
-                subcommand
-            );
         }
     }
 
