@@ -168,12 +168,11 @@ enum PluginCommands {
     },
 }
 
-/// Arguments for `meta worktree` (passthrough to worktree subsystem)
+/// Arguments for `meta worktree`
 #[derive(Args)]
 struct WorktreeArgs {
-    /// Arguments passed to the worktree subsystem
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    args: Vec<String>,
+    #[command(subcommand)]
+    command: worktree::WorktreeCommands,
 }
 
 // === Help Utilities ===
@@ -243,7 +242,7 @@ fn main() -> Result<()> {
         }
         Some(Commands::Plugin(args)) => handle_plugin_command(args.command, cli.verbose, cli.json),
         Some(Commands::Worktree(args)) => {
-            worktree::handle_worktree_command(&args.args, cli.verbose, cli.json)
+            worktree::handle_worktree_command(args.command, cli.verbose, cli.json)
         }
         Some(Commands::Exec(args)) => {
             handle_command_dispatch(args.command, &cli, &subprocess_plugins, true)

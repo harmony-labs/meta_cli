@@ -5,14 +5,223 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use clap::{Args, Subcommand};
 use colored::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use meta_cli::config;
+
+// ==================== CLI Structs ====================
+
+/// Worktree subcommands parsed by clap.
+#[derive(Subcommand)]
+pub enum WorktreeCommands {
+    /// Create a new worktree set
+    Create(CreateArgs),
+    /// Add a repo to an existing worktree set
+    Add(AddArgs),
+    /// Remove a worktree set
+    Destroy(DestroyArgs),
+    /// List all worktree sets
+    List(ListArgs),
+    /// Show detailed status of a worktree set
+    Status(StatusArgs),
+    /// Show cross-repo diff vs base branch
+    Diff(DiffArgs),
+    /// Run a command across worktree repos
+    Exec(ExecArgs),
+    /// Remove expired/orphaned worktrees
+    Prune(PruneArgs),
+}
+
+/// A repo specifier: `alias` or `alias:branch`
+#[derive(Debug, Clone)]
+pub struct RepoSpec {
+    pub alias: String,
+    pub branch: Option<String>,
+}
+
+impl std::str::FromStr for RepoSpec {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        if let Some(colon_pos) = s.find(':') {
+            Ok(RepoSpec {
+                alias: s[..colon_pos].to_string(),
+                branch: Some(s[colon_pos + 1..].to_string()),
+            })
+        } else {
+            Ok(RepoSpec {
+                alias: s.to_string(),
+                branch: None,
+            })
+        }
+    }
+}
+
+/// A metadata key=value pair: `key=value`
+#[derive(Debug, Clone)]
+pub struct MetaKV {
+    pub key: String,
+    pub value: String,
+}
+
+impl std::str::FromStr for MetaKV {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let eq_pos = s.find('=').ok_or_else(|| {
+            anyhow::anyhow!("--meta value '{s}' missing '=' separator (expected key=value)")
+        })?;
+        Ok(MetaKV {
+            key: s[..eq_pos].to_string(),
+            value: s[eq_pos + 1..].to_string(),
+        })
+    }
+}
+
+#[derive(Args)]
+pub struct CreateArgs {
+    /// Worktree name
+    pub name: String,
+
+    /// Override default branch name
+    #[arg(long)]
+    pub branch: Option<String>,
+
+    /// Add specific repo(s) (alias or alias:branch)
+    #[arg(long = "repo", value_name = "ALIAS[:BRANCH]")]
+    pub repos: Vec<RepoSpec>,
+
+    /// Add all repos from .meta config
+    #[arg(long, conflicts_with = "repos")]
+    pub all: bool,
+
+    /// Start from a specific tag/SHA
+    #[arg(long, value_name = "REF", conflicts_with = "from_pr")]
+    pub from_ref: Option<String>,
+
+    /// Start from a PR's head branch (owner/repo#N)
+    #[arg(long, value_name = "OWNER/REPO#N", conflicts_with = "from_ref")]
+    pub from_pr: Option<String>,
+
+    /// Mark for automatic cleanup
+    #[arg(long)]
+    pub ephemeral: bool,
+
+    /// Time-to-live (30s, 5m, 1h, 2d, 1w)
+    #[arg(long, value_name = "DURATION", value_parser = parse_duration_clap)]
+    pub ttl: Option<u64>,
+
+    /// Store custom metadata (key=value)
+    #[arg(long = "meta", value_name = "KEY=VALUE")]
+    pub custom_meta: Vec<MetaKV>,
+}
+
+#[derive(Args)]
+pub struct AddArgs {
+    /// Worktree name
+    pub name: String,
+
+    /// Repo(s) to add (alias or alias:branch)
+    #[arg(long = "repo", value_name = "ALIAS[:BRANCH]", required = true)]
+    pub repos: Vec<RepoSpec>,
+}
+
+#[derive(Args)]
+pub struct DestroyArgs {
+    /// Worktree name
+    pub name: String,
+
+    /// Remove even with uncommitted changes
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Args)]
+pub struct ListArgs {}
+
+#[derive(Args)]
+pub struct StatusArgs {
+    /// Worktree name
+    pub name: String,
+}
+
+#[derive(Args)]
+pub struct DiffArgs {
+    /// Worktree name
+    pub name: String,
+
+    /// Base branch for comparison
+    #[arg(long, default_value = "main")]
+    pub base: String,
+}
+
+#[derive(Args)]
+pub struct ExecArgs {
+    /// Worktree name
+    pub name: String,
+
+    /// Only run in specified repos (comma-separated)
+    #[arg(long, value_delimiter = ',')]
+    pub include: Vec<String>,
+
+    /// Skip specified repos (comma-separated)
+    #[arg(long, value_delimiter = ',')]
+    pub exclude: Vec<String>,
+
+    /// Run commands in parallel
+    #[arg(long)]
+    pub parallel: bool,
+
+    /// Atomic create+exec+destroy (requires --all or --repo, and -- <cmd>)
+    #[arg(long)]
+    pub ephemeral: bool,
+
+    // --- Ephemeral-only create flags (ignored when not --ephemeral) ---
+    /// Add specific repo(s) for ephemeral worktree (alias or alias:branch)
+    #[arg(long = "repo", value_name = "ALIAS[:BRANCH]")]
+    pub repos: Vec<RepoSpec>,
+
+    /// Add all repos for ephemeral worktree
+    #[arg(long)]
+    pub all: bool,
+
+    /// Store custom metadata for ephemeral worktree (key=value)
+    #[arg(long = "meta", value_name = "KEY=VALUE")]
+    pub custom_meta: Vec<MetaKV>,
+
+    /// Start from a specific tag/SHA (ephemeral only)
+    #[arg(long, value_name = "REF", conflicts_with = "from_pr")]
+    pub from_ref: Option<String>,
+
+    /// Start from a PR's head branch (ephemeral only, owner/repo#N)
+    #[arg(long, value_name = "OWNER/REPO#N", conflicts_with = "from_ref")]
+    pub from_pr: Option<String>,
+
+    /// Override branch name for ephemeral worktree
+    #[arg(long = "branch")]
+    pub branch: Option<String>,
+
+    /// Command and arguments to execute (after --)
+    #[arg(last = true, required = true)]
+    pub command: Vec<String>,
+}
+
+#[derive(Args)]
+pub struct PruneArgs {
+    /// Preview without removing
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// Parse a human-friendly duration string for clap value_parser.
+fn parse_duration_clap(s: &str) -> std::result::Result<u64, String> {
+    parse_duration(s).map_err(|e| e.to_string())
+}
 
 // ==================== Types ====================
 
@@ -206,99 +415,17 @@ pub fn detect_worktree_context(cwd: &std::path::Path) -> Option<(String, Vec<Pat
 
 // ==================== Entry Point ====================
 
-pub fn handle_worktree_command(args: &[String], verbose: bool, json: bool) -> Result<()> {
-    if args.is_empty() {
-        print_help();
-        return Ok(());
+pub fn handle_worktree_command(command: WorktreeCommands, verbose: bool, json: bool) -> Result<()> {
+    match command {
+        WorktreeCommands::Create(args) => handle_create(args, verbose, json),
+        WorktreeCommands::Add(args) => handle_add(args, verbose, json),
+        WorktreeCommands::Destroy(args) => handle_destroy(args, verbose, json),
+        WorktreeCommands::List(args) => handle_list(args, verbose, json),
+        WorktreeCommands::Status(args) => handle_status(args, verbose, json),
+        WorktreeCommands::Diff(args) => handle_diff(args, verbose, json),
+        WorktreeCommands::Exec(args) => handle_exec(args, verbose, json),
+        WorktreeCommands::Prune(args) => handle_prune(args, verbose, json),
     }
-
-    // --json may end up in trailing args due to clap's trailing_var_arg
-    let json = json || args.iter().any(|a| a == "--json");
-
-    match args[0].as_str() {
-        "create" => handle_create(&args[1..], verbose, json),
-        "add" => handle_add(&args[1..], verbose, json),
-        "destroy" => handle_destroy(&args[1..], verbose, json),
-        "list" => handle_list(&args[1..], verbose, json),
-        "status" => handle_status(&args[1..], verbose, json),
-        "diff" => handle_diff(&args[1..], verbose, json),
-        "exec" => handle_exec(&args[1..], verbose, json),
-        "prune" => handle_prune(&args[1..], verbose, json),
-        "--help" | "-h" => {
-            print_help();
-            Ok(())
-        }
-        other => {
-            eprintln!("{}: unrecognized worktree command '{}'", "error".red().bold(), other);
-            eprintln!();
-            // Print the actual help text to stderr (not a reference to --help)
-            eprint_help();
-            std::process::exit(1);
-        }
-    }
-}
-
-/// Write help text to a writer (supports both stdout and stderr).
-fn write_help(w: &mut dyn Write) {
-    let _ = writeln!(w, "meta worktree - Multi-repo worktree management");
-    let _ = writeln!(w);
-    let _ = writeln!(w, "USAGE:");
-    let _ = writeln!(w, "  meta worktree <command> [options]");
-    let _ = writeln!(w);
-    let _ = writeln!(w, "COMMANDS:");
-    let _ = writeln!(w, "  create <name>    Create a new worktree set");
-    let _ = writeln!(w, "  add <name>       Add a repo to an existing worktree set");
-    let _ = writeln!(w, "  list             List all worktree sets");
-    let _ = writeln!(w, "  status <name>    Show detailed status of a worktree set");
-    let _ = writeln!(w, "  diff <name>      Show cross-repo diff vs base branch");
-    let _ = writeln!(w, "  exec <name>      Run a command across worktree repos");
-    let _ = writeln!(w, "  prune            Remove expired/orphaned worktrees");
-    let _ = writeln!(w, "  destroy <name>   Remove a worktree set");
-    let _ = writeln!(w);
-    let _ = writeln!(w, "CREATE OPTIONS:");
-    let _ = writeln!(w, "  --repo <alias>[:<branch>]   Add specific repo(s)");
-    let _ = writeln!(w, "  --all                       Add all repos");
-    let _ = writeln!(w, "  --branch <name>             Override default branch name");
-    let _ = writeln!(w, "  --from-ref <ref>            Start from a specific tag/SHA");
-    let _ = writeln!(w, "  --from-pr <owner/repo#N>    Start from a PR's head branch");
-    let _ = writeln!(w, "  --ephemeral                 Mark for automatic cleanup");
-    let _ = writeln!(w, "  --ttl <duration>            Time-to-live (30s, 5m, 1h, 2d, 1w)");
-    let _ = writeln!(w, "  --meta <key=value>          Store custom metadata");
-    let _ = writeln!(w);
-    let _ = writeln!(w, "EXEC OPTIONS:");
-    let _ = writeln!(w, "  --ephemeral                 Atomic create+exec+destroy");
-    let _ = writeln!(w, "  --include <repos>           Only run in specified repos");
-    let _ = writeln!(w, "  --exclude <repos>           Skip specified repos");
-    let _ = writeln!(w, "  --parallel                  Run commands in parallel");
-    let _ = writeln!(w);
-    let _ = writeln!(w, "PRUNE OPTIONS:");
-    let _ = writeln!(w, "  --dry-run                   Preview without removing");
-    let _ = writeln!(w, "  --json                      Structured output");
-    let _ = writeln!(w);
-    let _ = writeln!(w, "DESTROY OPTIONS:");
-    let _ = writeln!(w, "  --force                     Remove even with uncommitted changes");
-    let _ = writeln!(w, "  --json                      Structured output");
-    let _ = writeln!(w);
-    let _ = writeln!(w, "EXAMPLES:");
-    let _ = writeln!(w, "  meta worktree create auth-fix --repo core --repo meta_cli");
-    let _ = writeln!(w, "  meta worktree create full-task --all");
-    let _ = writeln!(w, "  meta worktree create ci-check --all --ephemeral --ttl 1h --meta agent=ci");
-    let _ = writeln!(w, "  meta worktree create review --from-pr org/api#42 --repo api");
-    let _ = writeln!(w, "  meta worktree exec auth-fix -- cargo test");
-    let _ = writeln!(w, "  meta worktree exec --ephemeral lint --all -- make lint");
-    let _ = writeln!(w, "  meta worktree prune --dry-run");
-    let _ = writeln!(w, "  meta worktree diff auth-fix --base develop");
-    let _ = writeln!(w, "  meta worktree destroy auth-fix");
-}
-
-/// Print help to stdout (for --help flag).
-fn print_help() {
-    write_help(&mut std::io::stdout());
-}
-
-/// Print help to stderr (for error cases).
-fn eprint_help() {
-    write_help(&mut std::io::stderr());
 }
 
 // ==================== Helpers ====================
@@ -422,93 +549,6 @@ fn resolve_branch(task_name: &str, branch_flag: Option<&str>, per_repo_branch: O
         .or(branch_flag)
         .map(|s| s.to_string())
         .unwrap_or_else(|| task_name.to_string())
-}
-
-/// Parse --repo arguments: --repo alias[:branch]
-fn parse_repo_args(args: &[String]) -> Vec<(String, Option<String>)> {
-    let mut result = Vec::new();
-    let mut idx = 0;
-    while idx < args.len() {
-        if args[idx] == "--repo" {
-            idx += 1;
-            if idx < args.len() {
-                let val = &args[idx];
-                if let Some(colon_pos) = val.find(':') {
-                    let alias = val[..colon_pos].to_string();
-                    let branch = val[colon_pos + 1..].to_string();
-                    result.push((alias, Some(branch)));
-                } else {
-                    result.push((val.clone(), None));
-                }
-            }
-        }
-        idx += 1;
-    }
-    result
-}
-
-fn extract_flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    let mut idx = 0;
-    while idx < args.len() {
-        if args[idx] == flag && idx + 1 < args.len() {
-            return Some(&args[idx + 1]);
-        }
-        idx += 1;
-    }
-    None
-}
-
-fn has_flag(args: &[String], flag: &str) -> bool {
-    args.iter().any(|a| a == flag)
-}
-
-/// Flags that consume the next argument as their value.
-/// Used by `extract_name` and `handle_ephemeral_exec` to skip flag values.
-const FLAGS_WITH_VALUES: &[&str] = &[
-    "--repo", "--meta", "--from-ref", "--from-pr", "--ttl",
-    "--include", "--exclude", "--branch", "--base",
-];
-
-/// Extract the positional name (first arg that isn't a flag or a flag's value).
-fn extract_name(args: &[String]) -> Option<&str> {
-    args.iter()
-        .enumerate()
-        .find(|(i, a)| {
-            if a.starts_with("--") { return false; }
-            if *i > 0 {
-                let prev = args[*i - 1].as_str();
-                if FLAGS_WITH_VALUES.contains(&prev) { return false; }
-            }
-            true
-        })
-        .map(|(_, s)| s.as_str())
-}
-
-/// Parse `--meta key=value` pairs from args into a HashMap.
-fn parse_meta_kv(args: &[String]) -> HashMap<String, String> {
-    let mut result = HashMap::new();
-    let mut idx = 0;
-    while idx < args.len() {
-        if args[idx] == "--meta" {
-            idx += 1;
-            if idx < args.len() {
-                let val = &args[idx];
-                if let Some(eq_pos) = val.find('=') {
-                    let key = val[..eq_pos].to_string();
-                    let value = val[eq_pos + 1..].to_string();
-                    result.insert(key, value);
-                } else {
-                    eprintln!(
-                        "{} --meta value '{}' missing '=' separator (expected key=value)",
-                        "warning:".yellow().bold(),
-                        val
-                    );
-                }
-            }
-        }
-        idx += 1;
-    }
-    result
 }
 
 /// Parse a human-friendly duration string to seconds.
@@ -1123,26 +1163,22 @@ fn git_diff_stat(worktree_path: &Path, base_ref: &str) -> Result<(usize, usize, 
 
 // ==================== Subcommand: create ====================
 
-fn handle_create(args: &[String], verbose: bool, json: bool) -> Result<()> {
-    let name = extract_name(args)
-        .ok_or_else(|| anyhow::anyhow!("Usage: meta worktree create <name> [--branch <branch>] [--repo <alias>[:<branch>]]... [--all] [--json]"))?;
+fn handle_create(args: CreateArgs, verbose: bool, json: bool) -> Result<()> {
+    let name = &args.name;
     validate_worktree_name(name)?;
 
-    let branch_flag = extract_flag_value(args, "--branch");
-    let repo_specs = parse_repo_args(args);
-    let use_all = has_flag(args, "--all");
-    let ephemeral = has_flag(args, "--ephemeral");
-    let ttl_seconds = extract_flag_value(args, "--ttl")
-        .map(parse_duration)
-        .transpose()?;
-    let custom_meta = parse_meta_kv(args);
-    let from_ref = extract_flag_value(args, "--from-ref");
-    let from_pr_spec = extract_flag_value(args, "--from-pr");
-
-    // --from-ref and --from-pr are mutually exclusive
-    if from_ref.is_some() && from_pr_spec.is_some() {
-        anyhow::bail!("--from-ref and --from-pr are mutually exclusive");
-    }
+    let branch_flag = args.branch.as_deref();
+    let repo_specs: Vec<(String, Option<String>)> = args.repos.iter()
+        .map(|r| (r.alias.clone(), r.branch.clone()))
+        .collect();
+    let use_all = args.all;
+    let ephemeral = args.ephemeral;
+    let ttl_seconds = args.ttl;
+    let custom_meta: HashMap<String, String> = args.custom_meta.iter()
+        .map(|kv| (kv.key.clone(), kv.value.clone()))
+        .collect();
+    let from_ref = args.from_ref.as_deref();
+    let from_pr_spec = args.from_pr.as_deref();
 
     // Resolve --from-pr: get PR head branch and identify matching repo
     let from_pr_info = from_pr_spec
@@ -1396,15 +1432,13 @@ fn handle_create(args: &[String], verbose: bool, json: bool) -> Result<()> {
 
 // ==================== Subcommand: add ====================
 
-fn handle_add(args: &[String], verbose: bool, json: bool) -> Result<()> {
-    let name = extract_name(args)
-        .ok_or_else(|| anyhow::anyhow!("Usage: meta worktree add <name> --repo <alias>[:<branch>]"))?;
+fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()> {
+    let name = &args.name;
     validate_worktree_name(name)?;
 
-    let repo_specs = parse_repo_args(args);
-    if repo_specs.is_empty() {
-        anyhow::bail!("--repo <alias>[:<branch>] is required for 'meta worktree add'");
-    }
+    let repo_specs: Vec<(String, Option<String>)> = args.repos.iter()
+        .map(|r| (r.alias.clone(), r.branch.clone()))
+        .collect();
 
     // Check for "." alias
     if repo_specs.iter().any(|(a, _)| a == ".") {
@@ -1514,7 +1548,7 @@ fn handle_add(args: &[String], verbose: bool, json: bool) -> Result<()> {
 
 // ==================== Subcommand: list ====================
 
-fn handle_list(_args: &[String], _verbose: bool, json: bool) -> Result<()> {
+fn handle_list(_args: ListArgs, _verbose: bool, json: bool) -> Result<()> {
     let meta_dir = find_meta_dir();
     let worktree_root = resolve_worktree_root(meta_dir.as_deref())?;
 
@@ -1623,9 +1657,8 @@ fn handle_list(_args: &[String], _verbose: bool, json: bool) -> Result<()> {
 
 // ==================== Subcommand: status ====================
 
-fn handle_status(args: &[String], _verbose: bool, json: bool) -> Result<()> {
-    let name = extract_name(args)
-        .ok_or_else(|| anyhow::anyhow!("Usage: meta worktree status <name> [--json]"))?;
+fn handle_status(args: StatusArgs, _verbose: bool, json: bool) -> Result<()> {
+    let name = &args.name;
 
     let ctx = resolve_existing_worktree(name)?;
 
@@ -1700,10 +1733,9 @@ fn handle_status(args: &[String], _verbose: bool, json: bool) -> Result<()> {
 
 // ==================== Subcommand: diff ====================
 
-fn handle_diff(args: &[String], _verbose: bool, json: bool) -> Result<()> {
-    let name = extract_name(args)
-        .ok_or_else(|| anyhow::anyhow!("Usage: meta worktree diff <name> [--base <ref>] [--json]"))?;
-    let base_ref = extract_flag_value(args, "--base").unwrap_or("main");
+fn handle_diff(args: DiffArgs, _verbose: bool, json: bool) -> Result<()> {
+    let name = &args.name;
+    let base_ref = &args.base;
 
     let ctx = resolve_existing_worktree(name)?;
 
@@ -1788,10 +1820,9 @@ fn handle_diff(args: &[String], _verbose: bool, json: bool) -> Result<()> {
 
 // ==================== Subcommand: destroy ====================
 
-fn handle_destroy(args: &[String], verbose: bool, json: bool) -> Result<()> {
-    let name = extract_name(args)
-        .ok_or_else(|| anyhow::anyhow!("Usage: meta worktree destroy <name> [--force] [--json]"))?;
-    let force = has_flag(args, "--force");
+fn handle_destroy(args: DestroyArgs, verbose: bool, json: bool) -> Result<()> {
+    let name = &args.name;
+    let force = args.force;
 
     let meta_dir = find_meta_dir();
     let worktree_root = resolve_worktree_root(meta_dir.as_deref())?;
@@ -1902,73 +1933,24 @@ fn handle_destroy(args: &[String], verbose: bool, json: bool) -> Result<()> {
 
 // ==================== Subcommand: exec ====================
 
-fn handle_exec(args: &[String], verbose: bool, json: bool) -> Result<()> {
-    // Check for --ephemeral mode first
-    if has_flag(args, "--ephemeral") {
+fn handle_exec(args: ExecArgs, verbose: bool, json: bool) -> Result<()> {
+    if args.ephemeral {
         return handle_ephemeral_exec(args, verbose, json);
     }
 
-    // Parse: <name> [--include <a>] [--exclude <a>] [--parallel] [--json] -- <cmd>
-    let name = extract_name(args)
-        .ok_or_else(|| anyhow::anyhow!("Usage: meta worktree exec <name> [--include <a>] [--exclude <a>] [--parallel] -- <cmd>"))?;
-
+    let name = &args.name;
     let ctx = resolve_existing_worktree(name)?;
 
-    // Parse flags and extract command after "--"
-    let mut include_filters: Vec<String> = Vec::new();
-    let mut exclude_filters: Vec<String> = Vec::new();
-    let mut parallel = false;
-    let mut cmd_parts: Vec<String> = Vec::new();
-    let mut past_separator = false;
-    let mut json_flag = json;
-
-    let mut idx = 0;
-    while idx < args.len() {
-        if args[idx] == "--" {
-            past_separator = true;
-            idx += 1;
-            continue;
-        }
-        if past_separator {
-            cmd_parts.push(args[idx].clone());
-            idx += 1;
-            continue;
-        }
-        match args[idx].as_str() {
-            "--include" => {
-                idx += 1;
-                if idx < args.len() {
-                    include_filters.extend(
-                        args[idx].split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
-                    );
-                }
-            }
-            "--exclude" => {
-                idx += 1;
-                if idx < args.len() {
-                    exclude_filters.extend(
-                        args[idx].split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
-                    );
-                }
-            }
-            "--parallel" => parallel = true,
-            "--json" => json_flag = true,
-            _ => {} // name or unknown, skip
-        }
-        idx += 1;
-    }
-
-    if cmd_parts.is_empty() {
-        anyhow::bail!("No command specified. Usage: meta worktree exec <name> -- <cmd>");
-    }
+    let include_filters = args.include;
+    let exclude_filters = args.exclude;
+    let cmd_parts = args.command;
 
     // Discover repos in the worktree
     let repos = discover_worktree_repos(&ctx.wt_dir)?;
     if repos.is_empty() {
-        anyhow::bail!("No repos found in worktree '{}'", name);
+        anyhow::bail!("No repos found in worktree '{name}'");
     }
 
-    // Build directories list
     let directories: Vec<String> = repos
         .iter()
         .map(|r| r.path.display().to_string())
@@ -1991,9 +1973,9 @@ fn handle_exec(args: &[String], verbose: bool, json: bool) -> Result<()> {
         },
         verbose,
         silent: false,
-        parallel,
+        parallel: args.parallel,
         dry_run: false,
-        json_output: json_flag,
+        json_output: json,
         add_aliases_to_global_looprc: false,
         spawn_stagger_ms: 0,
     };
@@ -2004,56 +1986,32 @@ fn handle_exec(args: &[String], verbose: bool, json: bool) -> Result<()> {
 
 // ==================== Ephemeral Exec ====================
 
-fn handle_ephemeral_exec(args: &[String], verbose: bool, json: bool) -> Result<()> {
-    // Parse: --ephemeral <name> [--all] [--repo <a>]... [--meta k=v]... [--from-ref <r>] [--from-pr <s>] -- <cmd>
-
-    // Find the positional name: first non-flag arg that isn't a flag's value, before "--"
-    // Track the index so we can filter by position (not string equality) later.
-    let (name_idx, name) = args.iter().enumerate()
-        .take_while(|(_, a)| a.as_str() != "--")
-        .find(|(i, a)| {
-            if a.starts_with("--") { return false; }
-            // Check if this arg is the value of a preceding flag
-            if *i > 0 {
-                let prev = args[*i - 1].as_str();
-                if FLAGS_WITH_VALUES.contains(&prev) { return false; }
-            }
-            true
-        })
-        .map(|(i, a)| (i, a.clone()))
-        .ok_or_else(|| anyhow::anyhow!(
-            "Usage: meta worktree exec --ephemeral <name> [--all] [--repo <a>]... -- <cmd>"
-        ))?;
-
+fn handle_ephemeral_exec(args: ExecArgs, verbose: bool, json: bool) -> Result<()> {
+    let name = args.name.clone();
     validate_worktree_name(&name)?;
 
-    // Extract command after "--"
-    let separator_pos = args.iter().position(|a| a == "--");
-    let cmd_parts: Vec<String> = match separator_pos {
-        Some(pos) => args[pos + 1..].to_vec(),
-        None => anyhow::bail!("No command specified. Use -- before the command."),
-    };
+    let cmd_parts = args.command;
     if cmd_parts.is_empty() {
         anyhow::bail!("No command specified after --");
     }
 
-    // Build create args: name first (so extract_name finds it), then flags.
-    // Filter by index (not string equality) to avoid removing flag values that
-    // happen to match the worktree name (e.g. --repo backend when name is "backend").
-    let end = separator_pos.unwrap_or(args.len());
-    let flags_before_separator: Vec<String> = args[..end].iter()
-        .enumerate()
-        .filter(|(i, a)| *i != name_idx && a.as_str() != "--ephemeral")
-        .map(|(_, a)| a.clone())
-        .collect();
+    // Build CreateArgs from the exec args
+    let create_args = CreateArgs {
+        name: name.clone(),
+        branch: args.branch,
+        repos: args.repos,
+        all: args.all,
+        from_ref: args.from_ref,
+        from_pr: args.from_pr,
+        ephemeral: true,
+        ttl: None,
+        custom_meta: args.custom_meta,
+    };
 
-    // Create the worktree (with ephemeral flag forced, name at front for extract_name)
-    let mut full_create_args = vec![name.clone(), "--ephemeral".to_string()];
-    full_create_args.extend(flags_before_separator);
     if verbose {
         eprintln!("Creating ephemeral worktree '{name}'...");
     }
-    handle_create(&full_create_args, verbose, json)?;
+    handle_create(create_args, verbose, json)?;
 
     // Resolve worktree path for exec
     let meta_dir = find_meta_dir();
@@ -2075,7 +2033,7 @@ fn handle_ephemeral_exec(args: &[String], verbose: bool, json: bool) -> Result<(
         exclude_filters: None,
         verbose,
         silent: false,
-        parallel: has_flag(args, "--parallel"),
+        parallel: args.parallel,
         dry_run: false,
         json_output: json,
         add_aliases_to_global_looprc: false,
@@ -2088,8 +2046,11 @@ fn handle_ephemeral_exec(args: &[String], verbose: bool, json: bool) -> Result<(
     if verbose {
         eprintln!("Destroying ephemeral worktree '{name}'...");
     }
-    let destroy_args = vec![name.clone(), "--force".to_string()];
-    if let Err(e) = handle_destroy(&destroy_args, verbose, json) {
+    let destroy_args = DestroyArgs {
+        name: name.clone(),
+        force: true,
+    };
+    if let Err(e) = handle_destroy(destroy_args, verbose, json) {
         eprintln!(
             "{} Failed to destroy ephemeral worktree '{name}': {e}",
             "warning:".yellow().bold()
@@ -2121,8 +2082,8 @@ struct PruneEntry {
     age_seconds: Option<u64>,
 }
 
-fn handle_prune(args: &[String], _verbose: bool, json: bool) -> Result<()> {
-    let dry_run = has_flag(args, "--dry-run");
+fn handle_prune(args: PruneArgs, _verbose: bool, json: bool) -> Result<()> {
+    let dry_run = args.dry_run;
 
     let store: WorktreeStoreData = store_list()?;
     if store.worktrees.is_empty() {
