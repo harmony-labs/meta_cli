@@ -35,6 +35,8 @@ pub enum WorktreeCommands {
     Exec(ExecArgs),
     /// Remove expired/orphaned worktrees
     Prune(PruneArgs),
+    #[command(external_subcommand)]
+    Unknown(Vec<String>),
 }
 
 /// A repo specifier: `alias` or `alias:branch`
@@ -62,26 +64,6 @@ impl std::str::FromStr for RepoSpec {
     }
 }
 
-/// A metadata key=value pair: `key=value`
-#[derive(Debug, Clone)]
-pub struct MetaKV {
-    pub key: String,
-    pub value: String,
-}
-
-impl std::str::FromStr for MetaKV {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        let eq_pos = s.find('=').ok_or_else(|| {
-            anyhow::anyhow!("--meta value '{s}' missing '=' separator (expected key=value)")
-        })?;
-        Ok(MetaKV {
-            key: s[..eq_pos].to_string(),
-            value: s[eq_pos + 1..].to_string(),
-        })
-    }
-}
 
 #[derive(Args)]
 pub struct CreateArgs {
@@ -101,11 +83,11 @@ pub struct CreateArgs {
     pub all: bool,
 
     /// Start from a specific tag/SHA
-    #[arg(long, value_name = "REF", conflicts_with = "from_pr")]
+    #[arg(long, value_name = "REF")]
     pub from_ref: Option<String>,
 
     /// Start from a PR's head branch (owner/repo#N)
-    #[arg(long, value_name = "OWNER/REPO#N", conflicts_with = "from_ref")]
+    #[arg(long, value_name = "OWNER/REPO#N")]
     pub from_pr: Option<String>,
 
     /// Mark for automatic cleanup
@@ -118,7 +100,7 @@ pub struct CreateArgs {
 
     /// Store custom metadata (key=value)
     #[arg(long = "meta", value_name = "KEY=VALUE")]
-    pub custom_meta: Vec<MetaKV>,
+    pub custom_meta: Vec<String>,
 }
 
 #[derive(Args)]
@@ -158,6 +140,10 @@ pub struct DiffArgs {
     /// Base branch for comparison
     #[arg(long, default_value = "main")]
     pub base: String,
+
+    /// Show diffstat summary only
+    #[arg(long)]
+    pub stat: bool,
 }
 
 #[derive(Args)]
@@ -192,14 +178,14 @@ pub struct ExecArgs {
 
     /// Store custom metadata for ephemeral worktree (key=value)
     #[arg(long = "meta", value_name = "KEY=VALUE")]
-    pub custom_meta: Vec<MetaKV>,
+    pub custom_meta: Vec<String>,
 
     /// Start from a specific tag/SHA (ephemeral only)
-    #[arg(long, value_name = "REF", conflicts_with = "from_pr")]
+    #[arg(long, value_name = "REF")]
     pub from_ref: Option<String>,
 
     /// Start from a PR's head branch (ephemeral only, owner/repo#N)
-    #[arg(long, value_name = "OWNER/REPO#N", conflicts_with = "from_ref")]
+    #[arg(long, value_name = "OWNER/REPO#N")]
     pub from_pr: Option<String>,
 
     /// Override branch name for ephemeral worktree
@@ -425,7 +411,60 @@ pub fn handle_worktree_command(command: WorktreeCommands, verbose: bool, json: b
         WorktreeCommands::Diff(args) => handle_diff(args, verbose, json),
         WorktreeCommands::Exec(args) => handle_exec(args, verbose, json),
         WorktreeCommands::Prune(args) => handle_prune(args, verbose, json),
+        WorktreeCommands::Unknown(args) => {
+            let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
+            eprintln!(
+                "{}: unrecognized worktree subcommand '{}'",
+                "error".red().bold(),
+                cmd
+            );
+            eprintln!();
+            print_worktree_help();
+            std::process::exit(1);
+        }
     }
+}
+
+/// Print worktree help text to stdout.
+pub fn print_worktree_help() {
+    println!("Manage git worktrees across repos");
+    println!();
+    println!("USAGE: meta worktree <COMMAND> [OPTIONS]");
+    println!();
+    println!("COMMANDS:");
+    println!("  create   Create a new worktree set");
+    println!("  add      Add a repo to an existing worktree set");
+    println!("  destroy  Remove a worktree set");
+    println!("  list     List all worktree sets");
+    println!("  status   Show detailed status of a worktree set");
+    println!("  diff     Show cross-repo diff vs base branch");
+    println!("  exec     Run a command across worktree repos");
+    println!("  prune    Remove expired/orphaned worktrees");
+    println!();
+    println!("CREATE OPTIONS:");
+    println!("  --repo <ALIAS[:BRANCH]>  Add specific repo(s)");
+    println!("  --all                    Add all repos from .meta config");
+    println!("  --branch <NAME>          Override default branch name");
+    println!("  --from-ref <REF>         Start from a specific tag/SHA");
+    println!("  --from-pr <OWNER/REPO#N> Start from a PR's head branch");
+    println!("  --ephemeral              Mark for automatic cleanup");
+    println!("  --ttl <DURATION>         Time-to-live (30s, 5m, 1h, 2d, 1w)");
+    println!("  --meta <KEY=VALUE>       Store custom metadata");
+    println!();
+    println!("DESTROY OPTIONS:");
+    println!("  --force                  Remove even with uncommitted changes");
+    println!();
+    println!("EXEC OPTIONS:");
+    println!("  --include <REPOS>        Only run in specified repos");
+    println!("  --exclude <REPOS>        Skip specified repos");
+    println!("  --parallel               Run commands concurrently");
+    println!("  --ephemeral              Atomic create+exec+destroy");
+    println!();
+    println!("DIFF OPTIONS:");
+    println!("  --base <BRANCH>          Base branch for comparison (default: main)");
+    println!("  --stat                   Show diffstat summary only");
+    println!();
+    println!("Use 'meta worktree <command> --help' for more details.");
 }
 
 // ==================== Helpers ====================
@@ -1175,10 +1214,26 @@ fn handle_create(args: CreateArgs, verbose: bool, json: bool) -> Result<()> {
     let ephemeral = args.ephemeral;
     let ttl_seconds = args.ttl;
     let custom_meta: HashMap<String, String> = args.custom_meta.iter()
-        .map(|kv| (kv.key.clone(), kv.value.clone()))
+        .filter_map(|s| {
+            if let Some(eq_pos) = s.find('=') {
+                Some((s[..eq_pos].to_string(), s[eq_pos + 1..].to_string()))
+            } else {
+                eprintln!(
+                    "{} --meta value '{}' missing '=' separator (expected key=value), skipping",
+                    "warning:".yellow().bold(),
+                    s
+                );
+                None
+            }
+        })
         .collect();
     let from_ref = args.from_ref.as_deref();
     let from_pr_spec = args.from_pr.as_deref();
+
+    // Check mutual exclusion of --from-ref and --from-pr
+    if from_ref.is_some() && from_pr_spec.is_some() {
+        anyhow::bail!("--from-ref and --from-pr are mutually exclusive");
+    }
 
     // Resolve --from-pr: get PR head branch and identify matching repo
     let from_pr_info = from_pr_spec

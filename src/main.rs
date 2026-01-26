@@ -172,7 +172,7 @@ enum PluginCommands {
 #[derive(Args)]
 struct WorktreeArgs {
     #[command(subcommand)]
-    command: worktree::WorktreeCommands,
+    command: Option<worktree::WorktreeCommands>,
 }
 
 // === Help Utilities ===
@@ -241,9 +241,13 @@ fn main() -> Result<()> {
             init::handle_init_command(cmd, cli.verbose)
         }
         Some(Commands::Plugin(args)) => handle_plugin_command(args.command, cli.verbose, cli.json),
-        Some(Commands::Worktree(args)) => {
-            worktree::handle_worktree_command(args.command, cli.verbose, cli.json)
-        }
+        Some(Commands::Worktree(args)) => match args.command {
+            Some(cmd) => worktree::handle_worktree_command(cmd, cli.verbose, cli.json),
+            None => {
+                worktree::print_worktree_help();
+                Ok(())
+            }
+        },
         Some(Commands::Exec(args)) => {
             handle_command_dispatch(args.command, &cli, &subprocess_plugins, true)
         }
@@ -266,14 +270,11 @@ fn main() -> Result<()> {
 
 // === Command Dispatch (shared by exec and external) ===
 
-/// Meta flags extracted from command args (backward compatibility).
+/// Meta flags extracted from command args.
 ///
-/// When users place meta flags after the command (e.g., `meta exec -- pwd --include api`),
-/// we extract them from the command vec for backward compatibility.
-///
-/// **Deprecated:** Place meta flags before the subcommand instead:
-///   `meta --include foo exec pwd`   (preferred)
-///   `meta exec pwd --include foo`   (deprecated, still works)
+/// Meta flags can appear before or after the command. Both are supported:
+///   `meta --include foo exec pwd`
+///   `meta exec pwd --include foo`
 struct ExtractedFlags {
     include_filters: Vec<String>,
     exclude_filters: Vec<String>,
@@ -284,25 +285,11 @@ struct ExtractedFlags {
     cleaned_command: Vec<String>,
 }
 
-impl ExtractedFlags {
-    /// Returns true if any meta flags were extracted from trailing args.
-    fn has_trailing_flags(&self) -> bool {
-        !self.include_filters.is_empty()
-            || !self.exclude_filters.is_empty()
-            || self.parallel
-            || self.recursive
-            || self.dry_run
-            || self.depth.is_some()
-    }
-}
 
 /// Extract meta-specific flags from a command argument list.
 ///
-/// This handles backward-compatible flag placement where meta flags appear
-/// after the user command (e.g., `meta exec -- pwd --include api`).
-///
-/// **Deprecated:** This function exists for backward compatibility. Users should
-/// place meta flags before the subcommand (e.g., `meta --include foo exec pwd`).
+/// Extracts meta flags (--include, --exclude, --parallel, etc.) that appear
+/// after the command (e.g., `meta exec pwd --include api`).
 fn extract_meta_flags(args: &[String]) -> ExtractedFlags {
     let mut include_filters = Vec::new();
     let mut exclude_filters = Vec::new();
@@ -386,16 +373,8 @@ fn handle_command_dispatch(
     plugins: &SubprocessPluginManager,
     is_explicit_exec: bool,
 ) -> Result<()> {
-    // Extract meta flags embedded in the command args (backward compatibility)
+    // Extract meta flags embedded in the command args
     let extracted = extract_meta_flags(&raw_args);
-    if extracted.has_trailing_flags() {
-        eprintln!(
-            "{} Placing meta flags after the command is deprecated.",
-            "warning:".yellow().bold(),
-        );
-        eprintln!("  Use: meta [flags] exec <command>");
-        eprintln!("  e.g. meta --include foo exec pwd");
-    }
     let cleaned_command = extracted.cleaned_command;
 
     if cleaned_command.is_empty() {
