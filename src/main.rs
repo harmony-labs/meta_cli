@@ -270,114 +270,17 @@ fn main() -> Result<()> {
 
 // === Command Dispatch (shared by exec and external) ===
 
-/// Meta flags extracted from command args.
-///
-/// Meta flags can appear before or after the command. Both are supported:
-///   `meta --include foo exec pwd`
-///   `meta exec pwd --include foo`
-struct ExtractedFlags {
-    include_filters: Vec<String>,
-    exclude_filters: Vec<String>,
-    parallel: bool,
-    recursive: bool,
-    dry_run: bool,
-    depth: Option<usize>,
-    cleaned_command: Vec<String>,
-}
-
-
-/// Extract meta-specific flags from a command argument list.
-///
-/// Extracts meta flags (--include, --exclude, --parallel, etc.) that appear
-/// after the command (e.g., `meta exec pwd --include api`).
-fn extract_meta_flags(args: &[String]) -> ExtractedFlags {
-    let mut include_filters = Vec::new();
-    let mut exclude_filters = Vec::new();
-    let mut parallel = false;
-    let mut recursive = false;
-    let mut dry_run = false;
-    let mut depth = None;
-    let mut cleaned = Vec::new();
-
-    let mut idx = 0;
-    while idx < args.len() {
-        match args[idx].as_str() {
-            "--include" => {
-                idx += 1;
-                while idx < args.len() && !args[idx].starts_with("--") {
-                    let parts = args[idx]
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty());
-                    include_filters.extend(parts);
-                    idx += 1;
-                }
-            }
-            "--exclude" => {
-                idx += 1;
-                while idx < args.len() && !args[idx].starts_with("--") {
-                    let parts = args[idx]
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty());
-                    exclude_filters.extend(parts);
-                    idx += 1;
-                }
-            }
-            "--parallel" => {
-                parallel = true;
-                idx += 1;
-            }
-            "--recursive" | "-r" => {
-                recursive = true;
-                idx += 1;
-            }
-            "--dry-run" => {
-                dry_run = true;
-                idx += 1;
-            }
-            "--depth" => {
-                idx += 1;
-                if idx < args.len() {
-                    if let Ok(d) = args[idx].parse::<usize>() {
-                        depth = Some(d);
-                    }
-                    idx += 1;
-                }
-            }
-            _ => {
-                cleaned.push(args[idx].clone());
-                idx += 1;
-            }
-        }
-    }
-
-    ExtractedFlags {
-        include_filters,
-        exclude_filters,
-        parallel,
-        recursive,
-        dry_run,
-        depth,
-        cleaned_command: cleaned,
-    }
-}
-
 /// Dispatch a command to plugins or loop execution.
 ///
 /// Used by both `meta exec` (is_explicit_exec=true) and external subcommands
 /// (is_explicit_exec=false).
 fn handle_command_dispatch(
-    raw_args: Vec<String>,
+    command_args: Vec<String>,
     cli: &Cli,
     plugins: &SubprocessPluginManager,
     is_explicit_exec: bool,
 ) -> Result<()> {
-    // Extract meta flags embedded in the command args
-    let extracted = extract_meta_flags(&raw_args);
-    let cleaned_command = extracted.cleaned_command;
-
-    if cleaned_command.is_empty() {
+    if command_args.is_empty() {
         if is_explicit_exec {
             eprintln!("Usage: meta exec <command> [args...]");
         } else {
@@ -386,36 +289,32 @@ fn handle_command_dispatch(
         std::process::exit(1);
     }
 
-    // Merge clap-level flags with flags extracted from command args
-    let mut include_filters = extracted.include_filters;
-    let mut exclude_filters = extracted.exclude_filters;
-    if let Some(ref clap_includes) = cli.include {
-        include_filters.extend(clap_includes.iter().cloned());
-    }
-    if let Some(ref clap_excludes) = cli.exclude {
-        exclude_filters.extend(clap_excludes.iter().cloned());
-    }
-    let recursive = cli.recursive || extracted.recursive;
-    let dry_run = cli.dry_run || extracted.dry_run;
-    let depth = extracted.depth.or(cli.depth);
-    let parallel = cli.parallel || extracted.parallel;
+    // All meta flags come from clap globals (before the command).
+    // Command args pass through untouched to avoid collisions with
+    // identically-named flags (e.g., grep --include, git clone --depth).
+    let include_filters: Vec<String> = cli.include.clone().unwrap_or_default();
+    let exclude_filters: Vec<String> = cli.exclude.clone().unwrap_or_default();
+    let recursive = cli.recursive;
+    let dry_run = cli.dry_run;
+    let depth = cli.depth;
+    let parallel = cli.parallel;
 
-    let command_str = cleaned_command.join(" ");
+    let command_str = command_args.join(" ");
 
     // Check if this is `git clone` - it doesn't require a .meta file because
     // its purpose is to clone the repo that contains the .meta file
-    let is_git_clone = cleaned_command
+    let is_git_clone = command_args
         .first()
         .map(|s| s == "git")
         .unwrap_or(false)
-        && cleaned_command
+        && command_args
             .get(1)
             .map(|s| s == "clone")
             .unwrap_or(false);
 
     if is_git_clone {
         // Handle git clone directly via plugin without requiring .meta file
-        let clone_args: Vec<String> = cleaned_command.iter().skip(2).cloned().collect();
+        let clone_args: Vec<String> = command_args.iter().skip(2).cloned().collect();
 
         let subprocess_options = PluginRequestOptions {
             json_output: cli.json,
@@ -552,7 +451,7 @@ fn handle_command_dispatch(
 
                 if plugins.execute(
                     &command_str,
-                    &cleaned_command,
+                    &command_args,
                     &wt_directories,
                     subprocess_options,
                 )? {
@@ -567,7 +466,7 @@ fn handle_command_dispatch(
                 } else {
                     // Unrecognized command in worktree context
                     let first_cmd =
-                        cleaned_command.first().map(|s| s.as_str()).unwrap_or("");
+                        command_args.first().map(|s| s.as_str()).unwrap_or("");
                     eprintln!(
                         "{}: unrecognized command '{}'",
                         "error".red().bold(),
@@ -729,7 +628,7 @@ fn handle_command_dispatch(
 
     if plugins.execute(
         &command_str,
-        &cleaned_command,
+        &command_args,
         &project_paths,
         subprocess_options,
     )? {
@@ -757,7 +656,7 @@ fn handle_command_dispatch(
         run(&config, &command_str)?;
     } else {
         // Unrecognized command - show actual help text so LLMs can self-correct
-        let first_cmd = cleaned_command.first().map(|s| s.as_str()).unwrap_or("");
+        let first_cmd = command_args.first().map(|s| s.as_str()).unwrap_or("");
         eprintln!(
             "{}: unrecognized command '{}'",
             "error".red().bold(),
