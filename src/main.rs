@@ -376,14 +376,10 @@ fn handle_command_dispatch(
                                 .file_name()
                                 .map(|n| n.to_string_lossy().to_string())
                                 .unwrap_or_else(|| ".".to_string());
-                            // Check if this repo's project has matching tags
                             if let Some(info) = project_map.get(alias.as_str()) {
-                                let requested: Vec<&str> =
-                                    tag_filter.split(',').map(|s| s.trim()).collect();
-                                info.tags.iter().any(|t| requested.contains(&t.as_str()))
+                                matches_tag_filter(&info.tags, tag_filter)
                             } else {
-                                // Unknown projects pass through (no tags to filter on)
-                                true
+                                true // Unknown projects pass through
                             }
                         } else {
                             true
@@ -411,16 +407,8 @@ fn handle_command_dispatch(
                     );
                 }
 
-                let include_opt = if include_filters.is_empty() {
-                    None
-                } else {
-                    Some(include_filters.clone())
-                };
-                let exclude_opt = if exclude_filters.is_empty() {
-                    None
-                } else {
-                    Some(exclude_filters.clone())
-                };
+                let include_opt = none_if_empty(include_filters.clone());
+                let exclude_opt = none_if_empty(exclude_filters.clone());
 
                 let config = loop_lib::LoopConfig {
                     directories: wt_directories.clone(),
@@ -464,20 +452,7 @@ fn handle_command_dispatch(
                 } else if is_explicit_exec {
                     run(&config, &command_str)?;
                 } else {
-                    // Unrecognized command in worktree context
-                    let first_cmd =
-                        command_args.first().map(|s| s.as_str()).unwrap_or("");
-                    eprintln!(
-                        "{}: unrecognized command '{}'",
-                        "error".red().bold(),
-                        first_cmd
-                    );
-                    eprintln!();
-                    eprintln!("To run '{}' across all repos:", command_str);
-                    eprintln!("    meta exec {}", command_str);
-                    eprintln!();
-                    print_help_with_plugins(plugins, true);
-                    std::process::exit(1);
+                    unrecognized_command_error(&command_args, &command_str, plugins);
                 }
                 return Ok(());
             }
@@ -494,16 +469,8 @@ fn handle_command_dispatch(
             let directories: Vec<String> =
                 wt_paths.iter().map(|p| p.display().to_string()).collect();
 
-            let include_opt = if include_filters.is_empty() {
-                None
-            } else {
-                Some(include_filters)
-            };
-            let exclude_opt = if exclude_filters.is_empty() {
-                None
-            } else {
-                Some(exclude_filters)
-            };
+            let include_opt = none_if_empty(include_filters);
+            let exclude_opt = none_if_empty(exclude_filters);
 
             let config = loop_lib::LoopConfig {
                 directories,
@@ -550,16 +517,12 @@ fn handle_command_dispatch(
 
     // Filter projects by tags if --tag is specified
     let filtered_projects: Vec<&ProjectInfo> = if let Some(ref tag_filter) = cli.tag {
-        let requested_tags: Vec<&str> = tag_filter.split(',').map(|s| s.trim()).collect();
         if cli.verbose {
-            println!("Filtering projects by tags: {requested_tags:?}");
+            println!("Filtering projects by tags: {:?}", tag_filter.split(',').map(|s| s.trim()).collect::<Vec<_>>());
         }
         meta_projects
             .iter()
-            .filter(|p| {
-                // Project matches if it has any of the requested tags
-                p.tags.iter().any(|t| requested_tags.contains(&t.as_str()))
-            })
+            .filter(|p| matches_tag_filter(&p.tags, tag_filter))
             .collect()
     } else {
         meta_projects.iter().collect()
@@ -588,16 +551,8 @@ fn handle_command_dispatch(
     }
 
     // Prepare filter options (shared by both LoopConfig and PluginRequestOptions)
-    let include_opt = if include_filters.is_empty() {
-        None
-    } else {
-        Some(include_filters)
-    };
-    let exclude_opt = if exclude_filters.is_empty() {
-        None
-    } else {
-        Some(exclude_filters)
-    };
+    let include_opt = none_if_empty(include_filters);
+    let exclude_opt = none_if_empty(exclude_filters);
 
     let config = loop_lib::LoopConfig {
         add_aliases_to_global_looprc: cli.add_aliases_to_global_looprc,
@@ -636,14 +591,6 @@ fn handle_command_dispatch(
         if cli.verbose {
             println!("{}", "Command handled by subprocess plugin.".green());
         }
-    } else if is_git_clone {
-        log::info!("No plugin handled git clone, skipping loop fallback");
-        if cli.verbose {
-            println!(
-                "{}",
-                "No plugin handled git clone, skipping loop fallback.".yellow()
-            );
-        }
     } else if is_explicit_exec {
         // User explicitly requested exec, run the command in all repos
         log::info!("Explicit exec requested, running command via loop");
@@ -655,20 +602,7 @@ fn handle_command_dispatch(
         }
         run(&config, &command_str)?;
     } else {
-        // Unrecognized command - show actual help text so LLMs can self-correct
-        let first_cmd = command_args.first().map(|s| s.as_str()).unwrap_or("");
-        eprintln!(
-            "{}: unrecognized command '{}'",
-            "error".red().bold(),
-            first_cmd
-        );
-        eprintln!();
-        eprintln!("To run '{}' across all repos:", command_str);
-        eprintln!("    meta exec {}", command_str);
-        eprintln!();
-        // Print the actual help text to stderr (not a reference to --help)
-        print_help_with_plugins(plugins, true);
-        std::process::exit(1);
+        unrecognized_command_error(&command_args, &command_str, plugins);
     }
 
     Ok(())
@@ -756,7 +690,38 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
     Ok(())
 }
 
-// === Tree Utilities ===
+// === Helpers ===
+
+/// Check whether a project's tags match a comma-separated tag filter string.
+fn matches_tag_filter(tags: &[String], filter: &str) -> bool {
+    let requested: Vec<&str> = filter.split(',').map(|s| s.trim()).collect();
+    tags.iter().any(|t| requested.contains(&t.as_str()))
+}
+
+/// Convert an empty Vec into None, non-empty into Some.
+fn none_if_empty(v: Vec<String>) -> Option<Vec<String>> {
+    if v.is_empty() { None } else { Some(v) }
+}
+
+/// Print unrecognized command error with suggestion and help, then exit.
+fn unrecognized_command_error(
+    command_args: &[String],
+    command_str: &str,
+    plugins: &SubprocessPluginManager,
+) -> ! {
+    let first_cmd = command_args.first().map(|s| s.as_str()).unwrap_or("");
+    eprintln!(
+        "{}: unrecognized command '{}'",
+        "error".red().bold(),
+        first_cmd
+    );
+    eprintln!();
+    eprintln!("To run '{command_str}' across all repos:");
+    eprintln!("    meta exec {command_str}");
+    eprintln!();
+    print_help_with_plugins(plugins, true);
+    std::process::exit(1);
+}
 
 /// Flatten a meta tree into path strings, optionally filtering by tag.
 /// If tag_filter is Some, only includes nodes whose tags match (and recurses into them).
@@ -774,10 +739,7 @@ fn flatten_filtered_inner(
 ) {
     for node in nodes {
         let matches = match tag_filter {
-            Some(ref tag_str) => {
-                let requested: Vec<&str> = tag_str.split(',').map(|s| s.trim()).collect();
-                node.info.tags.iter().any(|t| requested.contains(&t.as_str()))
-            }
+            Some(ref tag_str) => matches_tag_filter(&node.info.tags, tag_str),
             None => true,
         };
 
