@@ -378,12 +378,12 @@ struct DiffTotals {
 // ==================== Context Detection ====================
 
 /// Detect if cwd is inside a `.worktrees/<name>/` directory.
-/// Returns (task_name, repo_paths) if inside a worktree, None otherwise.
+/// Returns (task_name, task_dir, repo_paths) if inside a worktree, None otherwise.
 /// Filesystem-based detection — no store dependency.
 ///
 /// Walks the path components looking for a `.worktrees` segment followed by a task name.
 /// Works whether cwd is the task dir itself, a repo within it, or deeper inside a repo.
-pub fn detect_worktree_context(cwd: &std::path::Path) -> Option<(String, Vec<PathBuf>)> {
+pub fn detect_worktree_context(cwd: &std::path::Path) -> Option<(String, PathBuf, Vec<PathBuf>)> {
     use std::path::Component;
 
     let components: Vec<_> = cwd.components().collect();
@@ -405,7 +405,7 @@ pub fn detect_worktree_context(cwd: &std::path::Path) -> Option<(String, Vec<Pat
                     return None;
                 }
                 let paths = repos.iter().map(|r| r.path.clone()).collect();
-                return Some((task_name, paths));
+                return Some((task_name, task_dir, paths));
             }
         }
     }

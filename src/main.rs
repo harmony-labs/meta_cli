@@ -466,7 +466,9 @@ fn handle_command_dispatch(
 
     // Context detection: if cwd is inside a worktree, auto-scope to its repos
     if !cli.primary {
-        if let Some((task_name, wt_paths)) = worktree::detect_worktree_context(&current_dir) {
+        if let Some((task_name, task_dir, wt_paths)) =
+            worktree::detect_worktree_context(&current_dir)
+        {
             if cli.verbose {
                 eprintln!(
                     "Detected worktree context: '{}' ({} repos)",
@@ -474,10 +476,145 @@ fn handle_command_dispatch(
                     wt_paths.len()
                 );
             }
-            let directories: Vec<String> = wt_paths
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect();
+
+            // Try to find .meta config for full feature support
+            if let Some((config_path, _format)) =
+                find_meta_config(&task_dir, cli.config.as_ref())
+            {
+                let (meta_projects, ignore_list) = parse_meta_config(&config_path)?;
+
+                // Build name→info lookup for tag filtering
+                let project_map: std::collections::HashMap<&str, &ProjectInfo> = meta_projects
+                    .iter()
+                    .map(|p| (p.name.as_str(), p))
+                    .collect();
+
+                // Derive aliases from worktree paths and filter by tags
+                let wt_directories: Vec<String> = wt_paths
+                    .iter()
+                    .filter(|path| {
+                        if let Some(ref tag_filter) = cli.tag {
+                            let alias = path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| ".".to_string());
+                            // Check if this repo's project has matching tags
+                            if let Some(info) = project_map.get(alias.as_str()) {
+                                let requested: Vec<&str> =
+                                    tag_filter.split(',').map(|s| s.trim()).collect();
+                                info.tags.iter().any(|t| requested.contains(&t.as_str()))
+                            } else {
+                                // Unknown projects pass through (no tags to filter on)
+                                true
+                            }
+                        } else {
+                            true
+                        }
+                    })
+                    .map(|p| p.display().to_string())
+                    .collect();
+
+                if wt_directories.is_empty() {
+                    eprintln!(
+                        "{}: no projects match tag filter '{}' in worktree '{}'",
+                        "warning".yellow().bold(),
+                        cli.tag.as_deref().unwrap_or(""),
+                        task_name
+                    );
+                    return Ok(());
+                }
+
+                // Check if the config is from the worktree itself or the primary checkout
+                let config_in_worktree = config_path.starts_with(&task_dir);
+                if cli.verbose && !config_in_worktree {
+                    eprintln!(
+                        "Using config from primary checkout: {}",
+                        config_path.display()
+                    );
+                }
+
+                let include_opt = if include_filters.is_empty() {
+                    None
+                } else {
+                    Some(include_filters.clone())
+                };
+                let exclude_opt = if exclude_filters.is_empty() {
+                    None
+                } else {
+                    Some(exclude_filters.clone())
+                };
+
+                let config = loop_lib::LoopConfig {
+                    directories: wt_directories.clone(),
+                    ignore: ignore_list,
+                    include_filters: include_opt.clone(),
+                    exclude_filters: exclude_opt.clone(),
+                    verbose: cli.verbose,
+                    silent: cli.silent,
+                    parallel,
+                    dry_run,
+                    json_output: cli.json,
+                    add_aliases_to_global_looprc: false,
+                    spawn_stagger_ms: 0,
+                };
+
+                // Try plugin dispatch first (full feature parity with normal path)
+                let subprocess_options = PluginRequestOptions {
+                    json_output: cli.json,
+                    verbose: cli.verbose,
+                    parallel,
+                    dry_run,
+                    silent: cli.silent,
+                    recursive,
+                    depth,
+                    include_filters: include_opt,
+                    exclude_filters: exclude_opt,
+                };
+
+                if plugins.execute(
+                    &command_str,
+                    &cleaned_command,
+                    &wt_directories,
+                    subprocess_options,
+                )? {
+                    if cli.verbose {
+                        println!(
+                            "{}",
+                            "Command handled by subprocess plugin (worktree).".green()
+                        );
+                    }
+                } else if is_explicit_exec {
+                    run(&config, &command_str)?;
+                } else {
+                    // Unrecognized command in worktree context
+                    let first_cmd =
+                        cleaned_command.first().map(|s| s.as_str()).unwrap_or("");
+                    eprintln!(
+                        "{}: unrecognized command '{}'",
+                        "error".red().bold(),
+                        first_cmd
+                    );
+                    eprintln!();
+                    eprintln!("To run '{}' across all repos:", command_str);
+                    eprintln!("    meta exec {}", command_str);
+                    eprintln!();
+                    print_help_with_plugins(plugins, true);
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
+
+            // No config found — degraded legacy path with warning
+            if cli.verbose {
+                eprintln!(
+                    "{} No .meta config found for worktree '{}'. Tags, plugins, and dependency features unavailable.",
+                    "warning:".yellow().bold(),
+                    task_name
+                );
+            }
+
+            let directories: Vec<String> =
+                wt_paths.iter().map(|p| p.display().to_string()).collect();
 
             let include_opt = if include_filters.is_empty() {
                 None
