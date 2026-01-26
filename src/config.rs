@@ -15,13 +15,17 @@ use std::path::{Path, PathBuf};
 pub enum ProjectEntry {
     /// Simple format: just a git URL string
     Simple(String),
-    /// Extended format: object with repo, optional path, and optional tags
+    /// Extended format: object with repo, optional path, tags, and dependency info
     Extended {
         repo: String,
         #[serde(default)]
         path: Option<String>,
         #[serde(default)]
         tags: Vec<String>,
+        #[serde(default)]
+        provides: Vec<String>,
+        #[serde(default)]
+        depends_on: Vec<String>,
     },
 }
 
@@ -32,6 +36,26 @@ pub struct ProjectInfo {
     pub path: String,
     pub repo: String,
     pub tags: Vec<String>,
+    /// What this project provides (e.g., APIs, libraries)
+    #[serde(default)]
+    pub provides: Vec<String>,
+    /// What this project depends on (other project names or provided items)
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+}
+
+impl ProjectInfo {
+    /// Convert to ProjectDependencies for use with the dependency graph
+    pub fn to_dependencies(&self) -> crate::dependency_graph::ProjectDependencies {
+        crate::dependency_graph::ProjectDependencies {
+            name: self.name.clone(),
+            path: self.path.clone(),
+            repo: self.repo.clone(),
+            tags: self.tags.clone(),
+            provides: self.provides.clone(),
+            depends_on: self.depends_on.clone(),
+        }
+    }
 }
 
 /// The meta configuration file structure
@@ -113,11 +137,17 @@ pub fn parse_meta_config(
         .projects
         .into_iter()
         .map(|(name, entry)| {
-            let (repo, path, tags) = match entry {
-                ProjectEntry::Simple(repo) => (repo, name.clone(), vec![]),
-                ProjectEntry::Extended { repo, path, tags } => {
+            let (repo, path, tags, provides, depends_on) = match entry {
+                ProjectEntry::Simple(repo) => (repo, name.clone(), vec![], vec![], vec![]),
+                ProjectEntry::Extended {
+                    repo,
+                    path,
+                    tags,
+                    provides,
+                    depends_on,
+                } => {
                     let resolved_path = path.unwrap_or_else(|| name.clone());
-                    (repo, resolved_path, tags)
+                    (repo, resolved_path, tags, provides, depends_on)
                 }
             };
             ProjectInfo {
@@ -125,6 +155,8 @@ pub fn parse_meta_config(
                 path,
                 repo,
                 tags,
+                provides,
+                depends_on,
             }
         })
         .collect();
