@@ -332,6 +332,7 @@ impl SubprocessPluginManager {
             .map(|c| DirCommand {
                 dir: c.dir.clone(),
                 cmd: c.cmd.clone(),
+                env: c.env.clone(),
             })
             .collect();
 

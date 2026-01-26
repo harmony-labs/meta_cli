@@ -32,6 +32,7 @@ fn test_dry_run_integration_loop_lib() {
     let commands = vec![DirCommand {
         dir: dir.path().to_str().unwrap().to_string(),
         cmd: format!("touch {}", marker_file2.display()),
+        env: None,
     }];
 
     let result = run_commands(&config, &commands);
@@ -96,10 +97,12 @@ fn test_different_commands_per_directory() {
         DirCommand {
             dir: dir1.to_str().unwrap().to_string(),
             cmd: format!("touch {}", file1.display()),
+            env: None,
         },
         DirCommand {
             dir: dir2.to_str().unwrap().to_string(),
             cmd: format!("touch {}", file2.display()),
+            env: None,
         },
     ];
 
@@ -196,6 +199,7 @@ fn test_dir_command_conversion() {
     let loop_cmd = LoopDirCommand {
         dir: parsed["dir"].as_str().unwrap().to_string(),
         cmd: parsed["cmd"].as_str().unwrap().to_string(),
+        env: None,
     };
 
     assert_eq!(loop_cmd.dir, "/home/user/project");
@@ -226,6 +230,7 @@ fn test_parallel_execution_with_different_commands() {
         DirCommand {
             dir: d.to_str().unwrap().to_string(),
             cmd: format!("touch {}", file.display()),
+            env: None,
         }
     }).collect();
 
