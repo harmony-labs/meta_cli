@@ -82,11 +82,6 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Set environment variable for JSON output mode so plugins can detect it
-    if cli.json {
-        log::debug!("JSON output mode enabled, setting META_JSON_OUTPUT=1");
-        std::env::set_var("META_JSON_OUTPUT", "1");
-    }
     log::debug!("cli.json = {}", cli.json);
 
     // Discover plugins early to handle --help requests and plugin listing
