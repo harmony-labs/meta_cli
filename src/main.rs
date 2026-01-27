@@ -102,6 +102,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Show workspace context summary
+    Context(ContextArgs),
     /// Execute a command across all repos
     Exec(ExecArgs),
     /// Initialize meta integrations
@@ -110,6 +112,14 @@ enum Commands {
     Plugin(PluginArgs),
     #[command(external_subcommand)]
     External(Vec<String>),
+}
+
+/// Arguments for `meta context`
+#[derive(Args)]
+struct ContextArgs {
+    /// Skip git status queries (structure only, faster)
+    #[arg(long)]
+    no_status: bool,
 }
 
 /// Arguments for `meta exec`
@@ -222,6 +232,9 @@ fn main() -> Result<()> {
         None => {
             print_help_with_plugins(&subprocess_plugins, false);
             std::process::exit(0);
+        }
+        Some(Commands::Context(args)) => {
+            meta_cli::context::handle_context(cli.json, args.no_status, cli.verbose)
         }
         Some(Commands::Init(args)) => {
             let cmd = match args.command {
