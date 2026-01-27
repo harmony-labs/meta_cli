@@ -8,11 +8,10 @@ use anyhow::{Context, Result};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::Path;
-use std::process::{Command, Stdio};
 
 use crate::config::{self, ProjectInfo};
 use crate::dependency_graph::DependencyGraph;
+use crate::git_utils;
 
 // ── Public API ──────────────────────────────────────────
 
@@ -43,33 +42,19 @@ pub fn handle_context(json: bool, no_status: bool, verbose: bool) -> Result<()> 
     }
 
     let repos: Vec<RepoContext> = if no_status {
-        projects
-            .iter()
-            .map(|p| RepoContext {
-                name: p.name.clone(),
-                path: p.path.clone(),
-                repo: p.repo.clone(),
-                branch: None,
-                dirty: None,
-                modified_count: None,
-                tags: p.tags.clone(),
-            })
-            .collect()
+        projects.iter().map(RepoContext::from_project).collect()
     } else {
         projects
             .par_iter()
             .map(|p| {
+                let mut ctx = RepoContext::from_project(p);
                 let repo_path = meta_dir.join(&p.path);
-                let (branch, dirty, modified_count) = query_repo_git_status(&repo_path);
-                RepoContext {
-                    name: p.name.clone(),
-                    path: p.path.clone(),
-                    repo: p.repo.clone(),
-                    branch,
-                    dirty,
-                    modified_count,
-                    tags: p.tags.clone(),
+                if repo_path.exists() {
+                    ctx.branch = git_utils::current_branch(&repo_path);
+                    ctx.dirty = git_utils::is_dirty(&repo_path);
+                    ctx.modified_count = git_utils::dirty_file_count(&repo_path);
                 }
+                ctx
             })
             .collect()
     };
@@ -127,6 +112,21 @@ pub struct RepoContext {
     pub tags: Vec<String>,
 }
 
+impl RepoContext {
+    /// Create a RepoContext from a ProjectInfo with no git status.
+    pub fn from_project(p: &ProjectInfo) -> Self {
+        Self {
+            name: p.name.clone(),
+            path: p.path.clone(),
+            repo: p.repo.clone(),
+            branch: None,
+            dirty: None,
+            modified_count: None,
+            tags: p.tags.clone(),
+        }
+    }
+}
+
 fn key_commands() -> Vec<CommandRef> {
     vec![
         CommandRef {
@@ -150,59 +150,6 @@ fn key_commands() -> Vec<CommandRef> {
             description: "target specific repos".to_string(),
         },
     ]
-}
-
-// ── Git Queries ─────────────────────────────────────────
-
-/// Query branch and dirty status for a single repo.
-/// Returns (branch, dirty, modified_count) — all None if git fails.
-fn query_repo_git_status(repo_path: &Path) -> (Option<String>, Option<bool>, Option<usize>) {
-    if !repo_path.exists() {
-        return (None, None, None);
-    }
-
-    let branch = git_current_branch(repo_path);
-    let (dirty, modified_count) = git_dirty_status(repo_path);
-
-    (branch, dirty, modified_count)
-}
-
-fn git_current_branch(repo_path: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .args(["branch", "--show-current"])
-        .current_dir(repo_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if branch.is_empty() {
-        None // detached HEAD
-    } else {
-        Some(branch)
-    }
-}
-
-fn git_dirty_status(repo_path: &Path) -> (Option<bool>, Option<usize>) {
-    let output = match Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(repo_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return (None, None),
-    };
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    let count = text.lines().filter(|l| !l.is_empty()).count();
-    (Some(count > 0), Some(count))
 }
 
 // ── Dependency Graph ────────────────────────────────────

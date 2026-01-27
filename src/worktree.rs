@@ -8,7 +8,8 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+use crate::git_utils;
 
 /// Discovered information about a repo within a worktree set.
 #[derive(Debug, Clone, Serialize)]
@@ -70,7 +71,7 @@ pub fn discover_worktree_repos(task_dir: &Path) -> Result<Vec<WorktreeRepoInfo>>
         .unwrap_or(false)
     {
         let source = source_repo_from_gitfile(&dot_git)?;
-        let branch = git_current_branch(task_dir).unwrap_or_else(|_| "HEAD".to_string());
+        let branch = git_utils::current_branch(task_dir).unwrap_or_else(|| "HEAD".to_string());
         repos.push(WorktreeRepoInfo {
             alias: ".".to_string(),
             branch,
@@ -96,7 +97,7 @@ pub fn discover_worktree_repos(task_dir: &Path) -> Result<Vec<WorktreeRepoInfo>>
             {
                 let source = source_repo_from_gitfile(&sub_git)?;
                 let branch =
-                    git_current_branch(&sub_path).unwrap_or_else(|_| "HEAD".to_string());
+                    git_utils::current_branch(&sub_path).unwrap_or_else(|| "HEAD".to_string());
                 let alias = sub_path
                     .file_name()
                     .unwrap_or_default()
@@ -152,13 +153,3 @@ fn source_repo_from_gitfile(git_file: &Path) -> Result<PathBuf> {
     Ok(repo_root.to_path_buf())
 }
 
-fn git_current_branch(repo_path: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(["branch", "--show-current"])
-        .current_dir(repo_path)
-        .output()?;
-    if !output.status.success() {
-        anyhow::bail!("Failed to get current branch");
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
