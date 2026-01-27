@@ -127,6 +127,16 @@ struct AgentArgs {
 enum AgentCommands {
     /// Evaluate a command for destructive patterns (PreToolUse hook)
     Guard,
+    /// Score Claude Code sessions for agent effectiveness
+    Score {
+        /// Specific session ID to score
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Score N most recent sessions
+        #[arg(long, conflicts_with = "session")]
+        recent: Option<usize>,
+    },
 }
 
 /// Arguments for `meta context`
@@ -250,11 +260,15 @@ fn main() -> Result<()> {
         }
         Some(Commands::Agent(args)) => match args.command {
             Some(AgentCommands::Guard) => meta_cli::agent_guard::handle_guard(),
+            Some(AgentCommands::Score { session, recent }) => {
+                meta_cli::agent_score::handle_score(session, recent, cli.json, cli.verbose)
+            }
             None => {
                 eprintln!("Usage: meta agent <command>");
                 eprintln!();
                 eprintln!("Commands:");
                 eprintln!("  guard   Evaluate a command for destructive patterns (PreToolUse hook)");
+                eprintln!("  score   Score Claude Code sessions for agent effectiveness");
                 Ok(())
             }
         },
