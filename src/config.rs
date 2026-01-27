@@ -74,6 +74,24 @@ pub enum ConfigFormat {
     Yaml,
 }
 
+/// Check if a directory has a meta config file (.meta, .meta.yaml, or .meta.yml).
+///
+/// Unlike `find_meta_config`, this does NOT walk up the directory tree.
+/// Returns the path and format if found.
+pub fn find_meta_config_in(dir: &Path) -> Option<(PathBuf, ConfigFormat)> {
+    for (name, format) in &[
+        (".meta", ConfigFormat::Json),
+        (".meta.yaml", ConfigFormat::Yaml),
+        (".meta.yml", ConfigFormat::Yaml),
+    ] {
+        let candidate = dir.join(name);
+        if candidate.exists() {
+            return Some((candidate, format.clone()));
+        }
+    }
+    None
+}
+
 /// Find the meta config file, checking for .meta, .meta.yaml, and .meta.yml
 ///
 /// Walks up from `start_dir` to the filesystem root, looking for config files.
