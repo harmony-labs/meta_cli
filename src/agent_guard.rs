@@ -114,15 +114,17 @@ fn evaluate_segment(segment: &str) -> Option<DenyReason> {
         .or_else(|| check_rm_rf_root(segment))
 }
 
-/// Split a compound command on `&&`, `||`, and `;` delimiters.
+/// Split a compound command on `&&`, `||`, `;`, and `|` delimiters.
 /// Simple split — does not handle quoting. Sufficient for Claude-generated commands.
 fn split_compound_command(command: &str) -> Vec<&str> {
     let mut segments = Vec::new();
     let mut rest = command;
 
     loop {
-        // Find the earliest delimiter
-        let delimiters: &[&str] = &[" && ", " || ", "; "];
+        // Find the earliest delimiter. Order matters: check multi-char delimiters
+        // before single-char ones so " && " is matched before "&&" could interfere.
+        // " | " must come after " || " to avoid partial matches.
+        let delimiters: &[&str] = &[" && ", " || ", "; ", " | "];
         let earliest = delimiters
             .iter()
             .filter_map(|d| rest.find(d).map(|pos| (pos, d.len())))
@@ -205,7 +207,7 @@ fn check_git_reset_hard(segment: &str) -> Option<DenyReason> {
     None
 }
 
-/// Detect `git clean -fd`, `-fdx`, `-fxd`, etc.
+/// Detect `git clean -fd`, `-fdx`, `-fxd`, `-f -d`, etc.
 fn check_git_clean_force(segment: &str) -> Option<DenyReason> {
     if !segment.contains("git") || !segment.contains("clean") {
         return None;
@@ -216,19 +218,24 @@ fn check_git_clean_force(segment: &str) -> Option<DenyReason> {
     let clean_pos = words.iter().skip(git_pos + 1).position(|w| *w == "clean")?;
     let clean_abs = git_pos + 1 + clean_pos;
 
+    // Collect all short-flag characters across all flag arguments after "clean".
+    // This handles both combined (-fd) and separate (-f -d) flag styles.
+    let mut flag_chars = String::new();
     for word in &words[clean_abs + 1..] {
-        // Match flags like -f, -fd, -fdx, -fxd, -fx, -df, -xfd, etc.
-        if word.starts_with('-') && !word.starts_with("--") && word.contains('f') && word.contains('d')
-        {
-            return Some(DenyReason {
-                reason: "git clean -fd removes untracked files and directories permanently. \
-                    In a multi-repo workspace, this affects all repos. Safer alternatives:\n\
-                    - git clean -nd (dry run — preview what would be removed)\n\
-                    - meta --include <repo> exec -- git clean -fd (target specific repos)\n\
-                    - meta git snapshot create <name> before cleaning"
-                    .to_string(),
-            });
+        if word.starts_with('-') && !word.starts_with("--") {
+            flag_chars.push_str(&word[1..]); // Strip leading '-'
         }
+    }
+
+    if flag_chars.contains('f') && flag_chars.contains('d') {
+        return Some(DenyReason {
+            reason: "git clean -fd removes untracked files and directories permanently. \
+                In a multi-repo workspace, this affects all repos. Safer alternatives:\n\
+                - git clean -nd (dry run — preview what would be removed)\n\
+                - meta --include <repo> exec -- git clean -fd (target specific repos)\n\
+                - meta git snapshot create <name> before cleaning"
+                .to_string(),
+        });
     }
 
     None
@@ -662,5 +669,121 @@ mod tests {
             v["hookSpecificOutput"]["permissionDecisionReason"],
             "test reason"
         );
+    }
+
+    // ── Pipe delimiter ───────────────────────────────
+
+    #[test]
+    fn split_pipe_delimiter() {
+        assert_eq!(
+            split_compound_command("git push --force | tee log.txt"),
+            vec!["git push --force", "tee log.txt"]
+        );
+    }
+
+    #[test]
+    fn denies_force_push_piped() {
+        assert!(evaluate_command("git push --force origin main | tee output.log").is_some());
+    }
+
+    #[test]
+    fn denies_reset_hard_piped() {
+        assert!(evaluate_command("git reset --hard | cat").is_some());
+    }
+
+    #[test]
+    fn split_pipe_does_not_confuse_or() {
+        // " || " should be matched as OR, not as two pipes
+        assert_eq!(
+            split_compound_command("cmd1 || cmd2"),
+            vec!["cmd1", "cmd2"]
+        );
+    }
+
+    // ── git clean separate flags ─────────────────────
+
+    #[test]
+    fn denies_git_clean_f_d_separate() {
+        assert!(evaluate_command("git clean -f -d").is_some());
+    }
+
+    #[test]
+    fn denies_git_clean_d_f_separate() {
+        assert!(evaluate_command("git clean -d -f").is_some());
+    }
+
+    #[test]
+    fn denies_git_clean_f_d_x_separate() {
+        assert!(evaluate_command("git clean -f -d -x").is_some());
+    }
+
+    #[test]
+    fn allows_git_clean_f_only() {
+        // -f alone without -d should be allowed (only removes files, not dirs)
+        assert!(evaluate_command("git clean -f").is_none());
+    }
+
+    // ── rm -rf edge cases ────────────────────────────
+
+    #[test]
+    fn denies_rm_rf_meta_yaml() {
+        assert!(evaluate_command("rm -rf .meta.yaml").is_some());
+    }
+
+    #[test]
+    fn denies_rm_rf_meta_yml() {
+        assert!(evaluate_command("rm -rf .meta.yml").is_some());
+    }
+
+    #[test]
+    fn denies_rm_rf_home_tilde() {
+        assert!(evaluate_command("rm -rf ~").is_some());
+    }
+
+    #[test]
+    fn denies_rm_rf_home_var() {
+        assert!(evaluate_command("rm -rf $HOME").is_some());
+    }
+
+    #[test]
+    fn denies_rm_rf_dot_star() {
+        assert!(evaluate_command("rm -rf ./*").is_some());
+    }
+
+    #[test]
+    fn denies_rm_rf_parent_star() {
+        assert!(evaluate_command("rm -rf ../*").is_some());
+    }
+
+    #[test]
+    fn denies_rm_rf_trailing_slash() {
+        assert!(evaluate_command("rm -rf ./").is_some());
+    }
+
+    #[test]
+    fn denies_rm_rf_multiple_targets_with_dangerous() {
+        // Should catch .meta even among safe targets
+        assert!(evaluate_command("rm -rf node_modules .meta target").is_some());
+    }
+
+    // ── parse_command edge cases ─────────────────────
+
+    #[test]
+    fn parse_command_handles_null_tool_input() {
+        assert_eq!(parse_command(r#"{"tool_input": null}"#), None);
+    }
+
+    #[test]
+    fn parse_command_handles_null_command() {
+        assert_eq!(
+            parse_command(r#"{"tool_input": {"command": null}}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_command_ignores_extra_fields() {
+        let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status","description":"check status"},"session_id":"abc"}"#;
+        assert_eq!(parse_command(input), Some("git status".to_string()));
     }
 }
