@@ -15,6 +15,7 @@ const SKILL_META_GIT: &str = include_str!("../../.claude/skills/meta-git.md");
 const SKILL_META_EXEC: &str = include_str!("../../.claude/skills/meta-exec.md");
 const SKILL_META_PLUGINS: &str = include_str!("../../.claude/skills/meta-plugins.md");
 const SKILL_META_WORKTREE: &str = include_str!("../../.claude/skills/meta-worktree.md");
+const SKILL_META_SAFETY: &str = include_str!("../../.claude/skills/meta-safety.md");
 
 /// Embedded settings template with hook configuration
 const SETTINGS_TEMPLATE: &str = include_str!("../../.claude/settings-template.json");
@@ -26,6 +27,7 @@ const SKILLS: &[(&str, &str)] = &[
     ("meta-exec.md", SKILL_META_EXEC),
     ("meta-plugins.md", SKILL_META_PLUGINS),
     ("meta-worktree.md", SKILL_META_WORKTREE),
+    ("meta-safety.md", SKILL_META_SAFETY),
 ];
 
 /// Typed init subcommand, mirroring the clap-parsed structure from main.
@@ -152,11 +154,68 @@ fn install_claude_integration_to(target_dir: &Path, force: bool, verbose: bool) 
     if installed > 0 {
         println!();
         println!("Claude Code is now configured for this meta repository:");
-        println!("  Skills:  .claude/skills/ (5 skill files)");
+        println!("  Skills:  .claude/skills/ (6 skill files)");
         println!("  Hooks:   .claude/settings.json (Stop hook for repo validation)");
     }
 
+    // Try to register Harmony Labs marketplace if claude CLI is available
+    register_marketplace(verbose);
+
     Ok(())
+}
+
+/// Register the Harmony Labs marketplace with Claude Code (if available).
+/// This is best-effort — if `claude` is not on PATH, skip silently.
+fn register_marketplace(verbose: bool) {
+    use std::process::Command;
+
+    // Check if claude CLI is available
+    let claude_available = Command::new("claude")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !claude_available {
+        if verbose {
+            println!(
+                "{} Claude CLI not found, skipping marketplace registration",
+                "•".yellow()
+            );
+        }
+        return;
+    }
+
+    // Register the marketplace (idempotent)
+    let result = Command::new("claude")
+        .args(["plugin", "marketplace", "add", "harmony-labs/claude-plugins"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    match result {
+        Ok(status) if status.success() => {
+            println!();
+            println!(
+                "{} Registered Harmony Labs plugin marketplace",
+                "✓".green()
+            );
+            println!(
+                "  Run {} for global plugin access",
+                "claude plugin install meta@harmony-labs".cyan()
+            );
+        }
+        _ => {
+            if verbose {
+                println!(
+                    "{} Failed to register marketplace (non-fatal)",
+                    "•".yellow()
+                );
+            }
+        }
+    }
 }
 
 fn write_file(path: &Path, content: &str, verbose: bool) -> Result<()> {
@@ -198,6 +257,7 @@ mod tests {
         assert!(skills_dir.join("meta-exec.md").exists());
         assert!(skills_dir.join("meta-plugins.md").exists());
         assert!(skills_dir.join("meta-worktree.md").exists());
+        assert!(skills_dir.join("meta-safety.md").exists());
 
         // Settings.json should exist with hook configuration
         let settings_path = claude_dir.join("settings.json");
