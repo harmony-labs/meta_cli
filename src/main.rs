@@ -9,8 +9,7 @@ use std::path::PathBuf;
 mod init;
 mod registry;
 mod subprocess_plugins;
-mod worktree;
-
+use meta_cli::worktree;
 use subprocess_plugins::{PluginRequestOptions, SubprocessPluginManager};
 
 // === CLI Structs ===
@@ -109,8 +108,6 @@ enum Commands {
     Init(InitArgs),
     /// Manage plugins
     Plugin(PluginArgs),
-    /// Manage git worktrees across repos
-    Worktree(WorktreeArgs),
     #[command(external_subcommand)]
     External(Vec<String>),
 }
@@ -166,13 +163,6 @@ enum PluginCommands {
         /// Plugin name
         name: String,
     },
-}
-
-/// Arguments for `meta worktree`
-#[derive(Args)]
-struct WorktreeArgs {
-    #[command(subcommand)]
-    command: Option<worktree::WorktreeCommands>,
 }
 
 // === Help Utilities ===
@@ -241,17 +231,16 @@ fn main() -> Result<()> {
             init::handle_init_command(cmd, cli.verbose)
         }
         Some(Commands::Plugin(args)) => handle_plugin_command(args.command, cli.verbose, cli.json),
-        Some(Commands::Worktree(args)) => match args.command {
-            Some(cmd) => worktree::handle_worktree_command(cmd, cli.verbose, cli.json),
-            None => {
-                worktree::print_worktree_help();
-                Ok(())
-            }
-        },
         Some(Commands::Exec(args)) => {
             handle_command_dispatch(args.command, &cli, &subprocess_plugins, true)
         }
         Some(Commands::External(args)) => {
+            // clap doesn't capture global flags that appear after an external
+            // subcommand name. Extract long-form global flags here so they
+            // work in both positions (before and after the subcommand).
+            let mut args = args;
+            extract_global_flags(&mut args, &mut cli);
+
             // Check for plugin help or bare plugin command first
             if let Some(first) = args.first() {
                 let wants_help = args.iter().any(|a| a == "--help" || a == "-h");
@@ -691,6 +680,29 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
 }
 
 // === Helpers ===
+
+/// Extract meta-only global flags from external subcommand args.
+///
+/// clap's `external_subcommand` captures all tokens after the first unrecognized
+/// subcommand, including global flags like `--json`. This function pulls them
+/// out and applies them to the CLI struct so they work regardless of position.
+///
+/// Only extracts flags that are meta-global and NOT reused by plugin subcommands.
+/// Flags like `--dry-run` and `--parallel` are left in args because plugin
+/// subcommands (e.g. `worktree prune --dry-run`, `worktree exec --parallel`)
+/// define their own versions and need to see them.
+fn extract_global_flags(args: &mut Vec<String>, cli: &mut Cli) {
+    args.retain(|arg| {
+        match arg.as_str() {
+            "--json" => { cli.json = true; false }
+            "--verbose" => { cli.verbose = true; false }
+            "--silent" => { cli.silent = true; false }
+            "--primary" => { cli.primary = true; false }
+            "--recursive" => { cli.recursive = true; false }
+            _ => true, // keep in args
+        }
+    });
+}
 
 /// Check whether a project's tags match a comma-separated tag filter string.
 fn matches_tag_filter(tags: &[String], filter: &str) -> bool {
