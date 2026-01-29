@@ -6,17 +6,61 @@
 
 use anyhow::{Context, Result};
 use rayon::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 
 use crate::config::{self, ProjectInfo};
 use crate::dependency_graph::DependencyGraph;
 use crate::git_utils;
 
+// ── Cache ───────────────────────────────────────────────
+
+const CACHE_TTL_SECONDS: u64 = 30;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CachedContext {
+    context: WorkspaceContext,
+    timestamp: SystemTime,
+    workspace_root: PathBuf,
+}
+
+fn cache_path() -> PathBuf {
+    meta_core::data_dir::data_file("context_cache")
+}
+
+fn load_cache() -> Option<CachedContext> {
+    let path = cache_path();
+    let content = std::fs::read(&path).ok()?;
+    serde_json::from_slice(&content).ok()
+}
+
+fn save_cache(cached: &CachedContext) {
+    let path = cache_path();
+    if let Ok(json) = serde_json::to_vec(cached) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+fn is_cache_valid(cached: &CachedContext, current_root: &PathBuf) -> bool {
+    // Check workspace root matches
+    if cached.workspace_root != *current_root {
+        return false;
+    }
+
+    // Check TTL
+    if let Ok(elapsed) = SystemTime::now().duration_since(cached.timestamp) {
+        elapsed < Duration::from_secs(CACHE_TTL_SECONDS)
+    } else {
+        false
+    }
+}
+
 // ── Public API ──────────────────────────────────────────
 
 /// Entry point for `meta context`.
-pub fn handle_context(json: bool, no_status: bool, verbose: bool) -> Result<()> {
+pub fn handle_context(json: bool, no_status: bool, no_cache: bool, verbose: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
 
     let (config_path, _format) = config::find_meta_config(&cwd, None)
@@ -24,7 +68,27 @@ pub fn handle_context(json: bool, no_status: bool, verbose: bool) -> Result<()> 
 
     let meta_dir = config_path
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("Invalid config path"))?;
+        .ok_or_else(|| anyhow::anyhow!("Invalid config path"))?
+        .to_path_buf();
+
+    // Try cache if not bypassed
+    if !no_cache && !no_status {
+        if let Some(cached) = load_cache() {
+            if is_cache_valid(&cached, &meta_dir) {
+                if verbose {
+                    eprintln!("Using cached context (age < {}s)", CACHE_TTL_SECONDS);
+                }
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&cached.context)?);
+                } else {
+                    print!("{}", format_markdown(&cached.context));
+                }
+                return Ok(());
+            } else if verbose {
+                eprintln!("Cache expired or invalid, regenerating...");
+            }
+        }
+    }
 
     let workspace_name = meta_dir
         .file_name()
@@ -53,6 +117,12 @@ pub fn handle_context(json: bool, no_status: bool, verbose: bool) -> Result<()> 
                     ctx.branch = git_utils::current_branch(&repo_path);
                     ctx.dirty = git_utils::is_dirty(&repo_path);
                     ctx.modified_count = git_utils::dirty_file_count(&repo_path);
+
+                    // Get ahead/behind counts
+                    if let Some((ahead, behind)) = git_utils::ahead_behind(&repo_path) {
+                        ctx.ahead = Some(ahead);
+                        ctx.behind = Some(behind);
+                    }
                 }
                 ctx
             })
@@ -70,6 +140,16 @@ pub fn handle_context(json: bool, no_status: bool, verbose: bool) -> Result<()> 
         dependencies,
     };
 
+    // Save to cache (only if status was collected and cache wasn't bypassed)
+    if !no_cache && !no_status {
+        let cached = CachedContext {
+            context: ctx.clone(),
+            timestamp: SystemTime::now(),
+            workspace_root: meta_dir,
+        };
+        save_cache(&cached);
+    }
+
     if json {
         println!("{}", serde_json::to_string_pretty(&ctx)?);
     } else {
@@ -81,7 +161,7 @@ pub fn handle_context(json: bool, no_status: bool, verbose: bool) -> Result<()> 
 
 // ── Types ───────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceContext {
     pub name: String,
     pub description: String,
@@ -92,13 +172,13 @@ pub struct WorkspaceContext {
     pub dependencies: Option<HashMap<String, Vec<String>>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandRef {
     pub command: String,
     pub description: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoContext {
     pub name: String,
     pub path: String,
@@ -109,6 +189,10 @@ pub struct RepoContext {
     pub dirty: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modified_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ahead: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behind: Option<usize>,
     pub tags: Vec<String>,
 }
 
@@ -122,6 +206,8 @@ impl RepoContext {
             branch: None,
             dirty: None,
             modified_count: None,
+            ahead: None,
+            behind: None,
             tags: p.tags.clone(),
         }
     }
@@ -259,11 +345,19 @@ pub fn format_markdown(ctx: &WorkspaceContext) -> String {
 }
 
 fn format_status(r: &RepoContext) -> String {
-    match (r.dirty, r.modified_count) {
+    let base = match (r.dirty, r.modified_count) {
         (Some(false), _) => "clean".to_string(),
         (Some(true), Some(n)) => format!("{n} modified"),
         (Some(true), None) => "dirty".to_string(),
         _ => "-".to_string(),
+    };
+
+    // Add ahead/behind indicator
+    match (r.ahead, r.behind) {
+        (Some(a), Some(b)) if a > 0 && b > 0 => format!("{} (↑{} ↓{})", base, a, b),
+        (Some(a), _) if a > 0 => format!("{} (↑{})", base, a),
+        (_, Some(b)) if b > 0 => format!("{} (↓{})", base, b),
+        _ => base,
     }
 }
 
@@ -292,6 +386,8 @@ mod tests {
             branch: branch.map(|s| s.to_string()),
             dirty,
             modified_count: modified,
+            ahead: None,
+            behind: None,
             tags: tags.into_iter().map(|s| s.to_string()).collect(),
         }
     }

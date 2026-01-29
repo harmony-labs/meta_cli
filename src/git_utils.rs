@@ -64,6 +64,73 @@ pub fn dirty_file_count(repo_path: &Path) -> Option<usize> {
     Some(text.lines().filter(|l| !l.is_empty()).count())
 }
 
+/// Returns (ahead, behind) commit counts relative to upstream, or `None` if no upstream or git fails.
+///
+/// - `ahead`: number of commits in local branch not in upstream
+/// - `behind`: number of commits in upstream not in local branch
+///
+/// Returns `None` if there's no tracking branch configured or git command fails.
+pub fn ahead_behind(repo_path: &Path) -> Option<(usize, usize)> {
+    // Get upstream branch
+    let upstream_output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "@{upstream}"])
+        .current_dir(repo_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+
+    if !upstream_output.status.success() {
+        return None; // No upstream configured
+    }
+
+    let upstream = String::from_utf8_lossy(&upstream_output.stdout)
+        .trim()
+        .to_string();
+
+    if upstream.is_empty() {
+        return None;
+    }
+
+    // Count ahead commits: HEAD vs upstream
+    let ahead_output = Command::new("git")
+        .args(["rev-list", "--count", &format!("{}..HEAD", upstream)])
+        .current_dir(repo_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+
+    if !ahead_output.status.success() {
+        return None;
+    }
+
+    let ahead = String::from_utf8_lossy(&ahead_output.stdout)
+        .trim()
+        .parse::<usize>()
+        .ok()?;
+
+    // Count behind commits: upstream vs HEAD
+    let behind_output = Command::new("git")
+        .args(["rev-list", "--count", &format!("HEAD..{}", upstream)])
+        .current_dir(repo_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+
+    if !behind_output.status.success() {
+        return None;
+    }
+
+    let behind = String::from_utf8_lossy(&behind_output.stdout)
+        .trim()
+        .parse::<usize>()
+        .ok()?;
+
+    Some((ahead, behind))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

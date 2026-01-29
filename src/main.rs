@@ -145,6 +145,10 @@ struct ContextArgs {
     /// Skip git status queries (structure only, faster)
     #[arg(long)]
     no_status: bool,
+
+    /// Bypass cache and force fresh context generation
+    #[arg(long)]
+    no_cache: bool,
 }
 
 /// Arguments for `meta exec`
@@ -273,7 +277,7 @@ fn main() -> Result<()> {
             }
         },
         Some(Commands::Context(args)) => {
-            meta_cli::context::handle_context(cli.json, args.no_status, cli.verbose)
+            meta_cli::context::handle_context(cli.json, args.no_status, args.no_cache, cli.verbose)
         }
         Some(Commands::Init(args)) => {
             let cmd = match args.command {
