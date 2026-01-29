@@ -8,6 +8,7 @@
 //! `~/.claude/agent-guard.toml` (user-level), with embedded defaults as fallback.
 
 use anyhow::Result;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::Path;
@@ -18,46 +19,186 @@ use std::sync::OnceLock;
 /// Default agent guard configuration embedded in the binary.
 const DEFAULT_CONFIG: &str = include_str!("../../.claude/agent-guard.toml");
 
-/// Cached configuration loaded once per process.
-/// This avoids repeated file I/O and TOML parsing on every command evaluation.
-static CACHED_CONFIG: OnceLock<GuardConfig> = OnceLock::new();
+/// Cached compiled patterns loaded once per process.
+/// This avoids repeated file I/O, TOML parsing, and regex compilation.
+static CACHED_PATTERNS: OnceLock<Vec<CompiledPattern>> = OnceLock::new();
 
-/// Agent guard configuration structure.
+/// Agent guard configuration structure (versioned schema).
 #[derive(Debug, Clone, Deserialize)]
 pub struct GuardConfig {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: String,
     #[serde(default)]
-    pub patterns: PatternConfig,
+    pub metadata: Option<ConfigMetadata>,
+    #[serde(default)]
+    pub patterns: Vec<PatternDefinition>,
 }
 
-/// Configuration for individual destructive patterns.
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct PatternConfig {
-    #[serde(default)]
-    pub git_force_push: PatternRule,
-    #[serde(default)]
-    pub git_reset_hard: PatternRule,
-    #[serde(default)]
-    pub git_clean_force: PatternRule,
-    #[serde(default)]
-    pub git_checkout_dot: PatternRule,
-    #[serde(default)]
-    pub git_branch_force_delete: PatternRule,
-    #[serde(default)]
-    pub git_stash_destructive: PatternRule,
-    #[serde(default)]
-    pub rm_rf_root: PatternRule,
+/// Metadata about the configuration file.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConfigMetadata {
+    pub source: String,
+    pub version: String,
+    pub description: Option<String>,
 }
 
-/// Individual pattern rule with enable flag and optional custom message.
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct PatternRule {
+/// Pattern definition from configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PatternDefinition {
+    pub id: String,
+    #[serde(default = "default_priority")]
+    pub priority: u32,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
-    pub message: Option<String>,
+    pub matcher: MatcherConfig,
+    #[serde(default)]
+    pub validator: Option<ValidatorConfig>,
+    pub message: String,
+}
+
+/// Matcher configuration (currently only regex, extensible for future types).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum MatcherConfig {
+    #[serde(rename = "regex")]
+    Regex { pattern: String },
+}
+
+/// Validator configuration for additional pattern checks.
+/// Validators are composable and can express complex logic without hardcoding.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum ValidatorConfig {
+    /// Reject if segment contains a specific substring
+    #[serde(rename = "not_contains")]
+    NotContains { value: String },
+
+    /// Ensure all specified flags are present after a command
+    #[serde(rename = "flags_present")]
+    FlagsPresent { command: String, flags: Vec<String> },
+
+    /// Check if any command arguments match values in a list
+    #[serde(rename = "args_match_any")]
+    ArgsMatchAny { command: String, values: Vec<String> },
+
+    /// All sub-validators must pass
+    #[serde(rename = "all_of")]
+    AllOf {
+        validators: Vec<ValidatorConfig>,
+    },
+
+    /// At least one sub-validator must pass
+    #[serde(rename = "any_of")]
+    AnyOf {
+        validators: Vec<ValidatorConfig>,
+    },
+
+    /// Negate the result of a sub-validator
+    #[serde(rename = "not")]
+    Not {
+        validator: Box<ValidatorConfig>,
+    },
+}
+
+/// Compiled pattern ready for evaluation.
+/// Regex is compiled once during initialization and cached for the process lifetime.
+struct CompiledPattern {
+    id: String,
+    priority: u32,
+    regex: Regex,
+    message: String,
+    validator: Option<ValidatorConfig>,
+}
+
+fn default_schema_version() -> String {
+    "1.0".to_string()
+}
+
+fn default_priority() -> u32 {
+    100
 }
 
 fn default_enabled() -> bool {
     true
+}
+
+// ── Validator Implementation ────────────────────────────
+
+/// Execute a validator configuration against a command segment.
+fn execute_validator(segment: &str, validator: &ValidatorConfig) -> bool {
+    match validator {
+        ValidatorConfig::NotContains { value } => !segment.contains(value.as_str()),
+
+        ValidatorConfig::FlagsPresent { command, flags } => {
+            validate_flags_present(segment, command, flags)
+        }
+
+        ValidatorConfig::ArgsMatchAny { command, values } => {
+            validate_args_match_any(segment, command, values)
+        }
+
+        ValidatorConfig::AllOf { validators } => {
+            validators.iter().all(|v| execute_validator(segment, v))
+        }
+
+        ValidatorConfig::AnyOf { validators } => {
+            validators.iter().any(|v| execute_validator(segment, v))
+        }
+
+        ValidatorConfig::Not { validator } => !execute_validator(segment, validator),
+    }
+}
+
+/// Check if all specified flags are present after a command.
+fn validate_flags_present(segment: &str, command: &str, required_flags: &[String]) -> bool {
+    let words: Vec<&str> = segment.split_whitespace().collect();
+    let cmd_pos = match words.iter().position(|w| *w == command) {
+        Some(pos) => pos,
+        None => return false,
+    };
+
+    // Collect all flag characters after the command
+    let mut flag_chars = String::new();
+    for word in &words[cmd_pos + 1..] {
+        if word.starts_with('-') && !word.starts_with("--") {
+            flag_chars.push_str(&word[1..]); // Strip leading '-'
+        }
+    }
+
+    // Check that all required flags are present
+    required_flags
+        .iter()
+        .all(|flag| flag.chars().all(|c| flag_chars.contains(c)))
+}
+
+/// Check if any arguments after a command match values in a list.
+fn validate_args_match_any(segment: &str, command: &str, values: &[String]) -> bool {
+    let words: Vec<&str> = segment.split_whitespace().collect();
+    let cmd_pos = match words.iter().position(|w| *w == command) {
+        Some(pos) => pos,
+        None => return false,
+    };
+
+    // Check arguments after the command (skip flags)
+    for word in &words[cmd_pos + 1..] {
+        if word.starts_with('-') {
+            continue; // Skip flags
+        }
+
+        // Normalize path for comparison
+        let normalized = word.trim_end_matches('/');
+        let normalized = if normalized.is_empty() {
+            word // Keep original if it becomes empty (like "/")
+        } else {
+            normalized
+        };
+
+        if values.iter().any(|v| v == normalized || v == word) {
+            return true;
+        }
+    }
+
+    false
 }
 
 impl GuardConfig {
@@ -100,6 +241,44 @@ impl GuardConfig {
     fn load_from_file(path: &Path) -> Option<Self> {
         let contents = std::fs::read_to_string(path).ok()?;
         toml::from_str(&contents).ok()
+    }
+
+    /// Compile patterns from configuration into regex matchers.
+    /// Returns compiled patterns sorted by priority (highest first).
+    fn compile_patterns(self) -> Vec<CompiledPattern> {
+        let mut compiled = Vec::new();
+
+        for pattern_def in self.patterns {
+            if !pattern_def.enabled {
+                continue; // Skip disabled patterns
+            }
+
+            let MatcherConfig::Regex { pattern: regex_str } = &pattern_def.matcher;
+
+            let regex = match Regex::new(regex_str) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!(
+                        "[agent-guard] WARNING: Failed to compile regex for pattern '{}': {}",
+                        pattern_def.id, e
+                    );
+                    continue;
+                }
+            };
+
+            compiled.push(CompiledPattern {
+                id: pattern_def.id,
+                priority: pattern_def.priority,
+                regex,
+                message: pattern_def.message,
+                validator: pattern_def.validator,
+            });
+        }
+
+        // Sort by priority (highest first)
+        compiled.sort_by(|a, b| b.priority.cmp(&a.priority));
+
+        compiled
     }
 }
 
@@ -185,94 +364,50 @@ fn parse_command(input: &str) -> Option<String> {
 
 // ── Command Evaluation ──────────────────────────────────
 
-/// Type alias for pattern check functions.
-type CheckFn = fn(&str) -> Option<DenyReason>;
-
-/// Pattern checker registry entry.
-struct PatternChecker {
-    name: &'static str,
-    check_fn: CheckFn,
-    get_rule: fn(&PatternConfig) -> &PatternRule,
-}
-
-/// Registry of all pattern checkers.
-/// This is the single source of truth for which patterns are checked.
-const PATTERN_CHECKERS: &[PatternChecker] = &[
-    PatternChecker {
-        name: "git_force_push",
-        check_fn: check_git_force_push,
-        get_rule: |c| &c.git_force_push,
-    },
-    PatternChecker {
-        name: "git_reset_hard",
-        check_fn: check_git_reset_hard,
-        get_rule: |c| &c.git_reset_hard,
-    },
-    PatternChecker {
-        name: "git_clean_force",
-        check_fn: check_git_clean_force,
-        get_rule: |c| &c.git_clean_force,
-    },
-    PatternChecker {
-        name: "git_checkout_dot",
-        check_fn: check_git_checkout_dot,
-        get_rule: |c| &c.git_checkout_dot,
-    },
-    PatternChecker {
-        name: "git_branch_force_delete",
-        check_fn: check_git_branch_force_delete,
-        get_rule: |c| &c.git_branch_force_delete,
-    },
-    PatternChecker {
-        name: "git_stash_destructive",
-        check_fn: check_git_stash_destructive,
-        get_rule: |c| &c.git_stash_destructive,
-    },
-    PatternChecker {
-        name: "rm_rf_root",
-        check_fn: check_rm_rf_root,
-        get_rule: |c| &c.rm_rf_root,
-    },
-];
-
 /// Evaluate a command string for destructive patterns.
 /// Returns a DenyReason if the command should be blocked, None if safe.
 ///
-/// Configuration is loaded once and cached for the lifetime of the process.
+/// Patterns are loaded and compiled once, then cached for the lifetime of the process.
 pub fn evaluate_command(command: &str) -> Option<DenyReason> {
-    let config = CACHED_CONFIG.get_or_init(GuardConfig::load);
+    let patterns = CACHED_PATTERNS.get_or_init(|| {
+        let config = GuardConfig::load();
+        config.compile_patterns()
+    });
+
     for segment in split_compound_command(command) {
         let trimmed = segment.trim();
         if trimmed.is_empty() {
             continue;
         }
-        if let Some(denial) = evaluate_segment(trimmed, config) {
+        if let Some(denial) = evaluate_segment(trimmed, patterns) {
             return Some(denial);
         }
     }
     None
 }
 
-/// Evaluate a single command segment using the config-driven pattern registry.
-fn evaluate_segment(segment: &str, config: &GuardConfig) -> Option<DenyReason> {
-    for checker in PATTERN_CHECKERS {
-        let rule = (checker.get_rule)(&config.patterns);
+/// Evaluate a single command segment using compiled regex patterns.
+fn evaluate_segment(segment: &str, patterns: &[CompiledPattern]) -> Option<DenyReason> {
+    for pattern in patterns {
+        if pattern.regex.is_match(segment) {
+            // Additional validation if required
+            if let Some(ref validator) = pattern.validator {
+                if !execute_validator(segment, validator) {
+                    continue; // Regex matched but validator rejected
+                }
+            }
 
-        if !rule.enabled {
-            continue; // Skip disabled patterns
-        }
-
-        if let Some(mut denial) = (checker.check_fn)(segment) {
             // Debug logging when META_DEBUG_GUARD is set
             if std::env::var("META_DEBUG_GUARD").is_ok() {
-                eprintln!("[agent-guard] Pattern '{}' triggered for: {}", checker.name, segment);
+                eprintln!(
+                    "[agent-guard] Pattern '{}' triggered for: {}",
+                    pattern.id, segment
+                );
             }
 
-            // Use custom message if provided, otherwise keep default
-            if let Some(custom_msg) = &rule.message {
-                denial.reason = custom_msg.clone();
-            }
-            return Some(denial);
+            return Some(DenyReason {
+                reason: pattern.message.clone(),
+            });
         }
     }
     None
@@ -341,260 +476,6 @@ fn find_standalone_pipe(s: &str) -> Option<usize> {
         }
     }
     None
-}
-
-// ── Destructive Pattern Checks ──────────────────────────
-
-/// Parse a git command into tokenized words and locate the subcommand.
-///
-/// Returns (words, subcommand_index) where subcommand_index points to the
-/// position after the subcommand in the words array.
-///
-/// Returns None if the segment doesn't match the expected pattern.
-fn parse_git_command<'a>(segment: &'a str, subcommand: &str) -> Option<(Vec<&'a str>, usize)> {
-    if !segment.contains("git") || !segment.contains(subcommand) {
-        return None;
-    }
-
-    let words: Vec<&str> = segment.split_whitespace().collect();
-    let git_pos = words.iter().position(|w| *w == "git")?;
-    let sub_pos = words.iter().skip(git_pos + 1).position(|w| *w == subcommand)?;
-    let sub_abs = git_pos + 1 + sub_pos;
-
-    Some((words, sub_abs))
-}
-
-/// Detect `git push --force` or `git push -f`, but NOT `--force-with-lease`.
-fn check_git_force_push(segment: &str) -> Option<DenyReason> {
-    let (words, push_pos) = parse_git_command(segment, "push")?;
-
-    // Check args after "push" for force flags
-    for word in &words[push_pos + 1..] {
-        if *word == "--force-with-lease" || word.starts_with("--force-with-lease=") {
-            return None; // Safe variant — allow
-        }
-        if *word == "--force" || *word == "-f" {
-            return Some(DenyReason {
-                reason: "git push --force in a multi-repo workspace can overwrite history across \
-                    multiple repos. Safer alternatives:\n\
-                    - git push --force-with-lease (checks for upstream changes)\n\
-                    - meta --include <repo> exec -- git push --force (target one repo)\n\
-                    - meta git snapshot create <name> before force pushing"
-                    .to_string(),
-            });
-        }
-    }
-
-    None
-}
-
-/// Detect `git reset --hard`.
-fn check_git_reset_hard(segment: &str) -> Option<DenyReason> {
-    let (words, reset_pos) = parse_git_command(segment, "reset")?;
-
-    for word in &words[reset_pos + 1..] {
-        if *word == "--hard" {
-            return Some(DenyReason {
-                reason: "git reset --hard destroys uncommitted work. In a multi-repo workspace, \
-                    this can silently discard changes across repos. Safer alternatives:\n\
-                    - meta git snapshot create <name> (save state first)\n\
-                    - meta git snapshot restore <name> (reversible reset)\n\
-                    - Target a specific repo: cd <repo> && git reset --hard"
-                    .to_string(),
-            });
-        }
-    }
-
-    None
-}
-
-/// Detect `git clean -fd`, `-fdx`, `-fxd`, `-f -d`, etc.
-fn check_git_clean_force(segment: &str) -> Option<DenyReason> {
-    let (words, clean_pos) = parse_git_command(segment, "clean")?;
-
-    // Collect all short-flag characters across all flag arguments after "clean".
-    // This handles both combined (-fd) and separate (-f -d) flag styles.
-    let mut flag_chars = String::new();
-    for word in &words[clean_pos + 1..] {
-        if word.starts_with('-') && !word.starts_with("--") {
-            flag_chars.push_str(&word[1..]); // Strip leading '-'
-        }
-    }
-
-    if flag_chars.contains('f') && flag_chars.contains('d') {
-        return Some(DenyReason {
-            reason: "git clean -fd removes untracked files and directories permanently. \
-                In a multi-repo workspace, this affects all repos. Safer alternatives:\n\
-                - git clean -nd (dry run — preview what would be removed)\n\
-                - meta --include <repo> exec -- git clean -fd (target specific repos)\n\
-                - meta git snapshot create <name> before cleaning"
-                .to_string(),
-        });
-    }
-
-    None
-}
-
-/// Detect `git checkout .` at workspace scope.
-fn check_git_checkout_dot(segment: &str) -> Option<DenyReason> {
-    if !segment.contains("git") || !segment.contains("checkout") {
-        return None;
-    }
-
-    let words: Vec<&str> = segment.split_whitespace().collect();
-    let git_pos = words.iter().position(|w| *w == "git")?;
-    let checkout_pos = words.iter().skip(git_pos + 1).position(|w| *w == "checkout")?;
-    let checkout_abs = git_pos + 1 + checkout_pos;
-
-    // Check if the argument after checkout is "." or "--" followed by "."
-    let remaining: Vec<&&str> = words[checkout_abs + 1..].iter().collect();
-    let is_dot = match remaining.as_slice() {
-        [dot] if **dot == "." => true,
-        [dashdash, dot] if **dashdash == "--" && **dot == "." => true,
-        _ => false,
-    };
-
-    if is_dot {
-        return Some(DenyReason {
-            reason: "git checkout . reverts all modified files. In a multi-repo workspace, \
-                ensure you are in the correct repo directory. Safer alternatives:\n\
-                - git checkout -- <specific-file> (target specific files)\n\
-                - meta --include <repo> exec -- git checkout . (target one repo)\n\
-                - meta git snapshot create <name> before reverting"
-                .to_string(),
-        });
-    }
-
-    None
-}
-
-/// Detect `git branch -D` (force delete branch).
-fn check_git_branch_force_delete(segment: &str) -> Option<DenyReason> {
-    let (words, branch_pos) = parse_git_command(segment, "branch")?;
-
-    // Check for -D flag (force delete)
-    for word in &words[branch_pos + 1..] {
-        if *word == "-D" {
-            return Some(DenyReason {
-                reason: "git branch -D force-deletes branches, potentially losing unmerged work. \
-                    In a multi-repo workspace, this can affect coordination between repos. Safer alternatives:\n\
-                    - git branch -d <branch> (safe delete — only works if merged)\n\
-                    - git branch -v to check merge status first\n\
-                    - meta git snapshot create <name> before deleting\n\
-                    - meta --include <repo> exec -- git branch -D <branch> (target specific repos)"
-                    .to_string(),
-            });
-        }
-    }
-
-    None
-}
-
-/// Detect `git stash drop` or `git stash clear` (destructive stash operations).
-fn check_git_stash_destructive(segment: &str) -> Option<DenyReason> {
-    let (words, stash_pos) = parse_git_command(segment, "stash")?;
-
-    // Check if next word is "drop" or "clear"
-    if let Some(&subcommand) = words.get(stash_pos + 1) {
-        if subcommand == "drop" {
-            return Some(DenyReason {
-                reason: "git stash drop permanently removes a stash entry. \
-                    For AI agents working across repos, this could discard important work. Safer alternatives:\n\
-                    - git stash list to review what will be dropped\n\
-                    - git stash show <stash> to inspect contents first\n\
-                    - git stash apply <stash> instead of pop (preserves the stash)\n\
-                    - meta git snapshot create <name> captures all stashes"
-                    .to_string(),
-            });
-        } else if subcommand == "clear" {
-            return Some(DenyReason {
-                reason: "git stash clear removes ALL stash entries permanently. \
-                    In a multi-repo workspace, this could discard important work across repos. Safer alternatives:\n\
-                    - git stash list to review what will be cleared\n\
-                    - git stash drop <stash> to remove specific entries one at a time\n\
-                    - meta git snapshot create <name> before clearing (captures all stashes)\n\
-                    - meta --include <repo> exec -- git stash clear (target specific repos)"
-                    .to_string(),
-            });
-        }
-    }
-
-    None
-}
-
-/// Detect `rm -rf` on workspace/repo root paths.
-fn check_rm_rf_root(segment: &str) -> Option<DenyReason> {
-    if !segment.contains("rm") {
-        return None;
-    }
-
-    let words: Vec<&str> = segment.split_whitespace().collect();
-    let rm_pos = words.iter().position(|w| *w == "rm")?;
-
-    // Check for -rf or -fr flags (may be combined or separate)
-    let args_after_rm = &words[rm_pos + 1..];
-    let has_recursive_force = args_after_rm.iter().any(|w| {
-        if !w.starts_with('-') || w.starts_with("--") {
-            return false;
-        }
-        w.contains('r') && w.contains('f')
-    });
-
-    if !has_recursive_force {
-        return None;
-    }
-
-    // Check if any path argument is a dangerous root-like path
-    for word in args_after_rm {
-        if word.starts_with('-') {
-            continue; // Skip flags
-        }
-        if is_dangerous_rm_target(word) {
-            return Some(DenyReason {
-                reason: format!(
-                    "rm -rf on '{word}' could destroy repo roots or workspace data. \
-                    In a multi-repo workspace, this is especially dangerous. Safer alternatives:\n\
-                    - Remove specific files instead of entire directories\n\
-                    - meta --dry-run exec -- <cmd> to preview operations\n\
-                    - meta git snapshot create <name> before destructive operations"
-                ),
-            });
-        }
-    }
-
-    None
-}
-
-/// Check if a path target is dangerous for rm -rf.
-fn is_dangerous_rm_target(path: &str) -> bool {
-    let path = path.trim_end_matches('/');
-
-    // Root filesystem (/ or ///)
-    if path.is_empty() {
-        return true;
-    }
-
-    // Home directory
-    if path == "~" || path == "$HOME" {
-        return true;
-    }
-
-    // Current directory or parent
-    if path == "." || path == ".." {
-        return true;
-    }
-
-    // Paths that are workspace markers
-    if path == ".meta" || path == ".meta.yaml" || path == ".meta.yml" {
-        return true;
-    }
-
-    // Wildcard at root level
-    if path == "*" || path == "./*" || path == "../*" {
-        return true;
-    }
-
-    false
 }
 
 // ── Tests ───────────────────────────────────────────────
@@ -1198,90 +1079,119 @@ mod tests {
     #[test]
     fn config_loads_embedded_defaults() {
         let config = GuardConfig::load_from_embedded();
-        assert!(config.patterns.git_force_push.enabled);
-        assert!(config.patterns.git_reset_hard.enabled);
-        assert!(config.patterns.git_branch_force_delete.enabled);
-        assert!(config.patterns.git_stash_destructive.enabled);
+        assert_eq!(config.schema_version, "1.0");
+        assert!(!config.patterns.is_empty());
+
+        // Verify all expected patterns are present
+        let pattern_ids: Vec<&str> = config.patterns.iter().map(|p| p.id.as_str()).collect();
+        assert!(pattern_ids.contains(&"meta.git.force_push"));
+        assert!(pattern_ids.contains(&"meta.git.reset_hard"));
+        assert!(pattern_ids.contains(&"meta.git.branch_force_delete"));
+        assert!(pattern_ids.contains(&"meta.git.stash_drop"));
+        assert!(pattern_ids.contains(&"meta.git.stash_clear"));
     }
 
     #[test]
     fn config_default_patterns_are_enabled() {
         let config = GuardConfig::load();
+
         // All default patterns should be enabled
-        assert!(config.patterns.git_force_push.enabled);
-        assert!(config.patterns.git_reset_hard.enabled);
-        assert!(config.patterns.git_clean_force.enabled);
-        assert!(config.patterns.git_checkout_dot.enabled);
-        assert!(config.patterns.git_branch_force_delete.enabled);
-        assert!(config.patterns.git_stash_destructive.enabled);
-        assert!(config.patterns.rm_rf_root.enabled);
+        for pattern in &config.patterns {
+            assert!(pattern.enabled, "Pattern {} should be enabled by default", pattern.id);
+        }
+
+        // Verify we have the expected number of patterns
+        assert!(config.patterns.len() >= 8, "Should have at least 8 default patterns");
     }
 
     #[test]
     fn config_can_parse_custom_toml() {
         let toml = r#"
-[patterns.git_force_push]
-enabled = false
+schema_version = "1.0"
 
-[patterns.git_reset_hard]
+[[patterns]]
+id = "meta.git.force_push"
+enabled = false
+matcher = { type = "regex", pattern = 'git\s+push.*--force' }
+message = "Force push disabled"
+
+[[patterns]]
+id = "meta.git.reset_hard"
 enabled = true
+matcher = { type = "regex", pattern = 'git\s+reset.*--hard' }
 message = "Custom reset message"
 "#;
         let config: GuardConfig = toml::from_str(toml).unwrap();
-        assert!(!config.patterns.git_force_push.enabled);
-        assert!(config.patterns.git_reset_hard.enabled);
-        assert_eq!(
-            config.patterns.git_reset_hard.message.as_ref().unwrap(),
-            "Custom reset message"
-        );
+        assert_eq!(config.schema_version, "1.0");
+        assert_eq!(config.patterns.len(), 2);
+
+        assert!(!config.patterns[0].enabled);
+        assert_eq!(config.patterns[0].id, "meta.git.force_push");
+
+        assert!(config.patterns[1].enabled);
+        assert_eq!(config.patterns[1].message, "Custom reset message");
     }
 
     #[test]
     fn disabled_pattern_is_not_checked() {
         // Create a custom config with git_force_push disabled
         let toml = r#"
-[patterns.git_force_push]
+schema_version = "1.0"
+
+[[patterns]]
+id = "meta.git.force_push"
 enabled = false
+matcher = { type = "regex", pattern = 'git\s+push.*\s+(--force|-f)\b(?!-with-lease)' }
+message = "test"
 "#;
         let config: GuardConfig = toml::from_str(toml).unwrap();
+        let patterns = config.compile_patterns();
 
         // This command should normally be denied, but with the pattern disabled it should pass
-        let result = evaluate_segment("git push --force origin main", &config);
+        let result = evaluate_segment("git push --force origin main", &patterns);
         assert!(result.is_none());
     }
 
     #[test]
     fn custom_message_overrides_default() {
         let toml = r#"
-[patterns.git_force_push]
+schema_version = "1.0"
+
+[[patterns]]
+id = "meta.git.force_push"
 enabled = true
+matcher = { type = "regex", pattern = 'git\s+push.*(--force|-f)\b' }
 message = "TEAM POLICY: No force push ever!"
 "#;
         let config: GuardConfig = toml::from_str(toml).unwrap();
-        let result = evaluate_segment("git push --force", &config).unwrap();
+        let patterns = config.compile_patterns();
+        let result = evaluate_segment("git push --force", &patterns).unwrap();
         assert_eq!(result.reason, "TEAM POLICY: No force push ever!");
     }
 
     #[test]
-    fn pattern_checker_registry_covers_all_patterns() {
-        // Ensure the registry has an entry for each pattern
-        let pattern_names: Vec<&str> = PATTERN_CHECKERS.iter().map(|c| c.name).collect();
-        assert!(pattern_names.contains(&"git_force_push"));
-        assert!(pattern_names.contains(&"git_reset_hard"));
-        assert!(pattern_names.contains(&"git_clean_force"));
-        assert!(pattern_names.contains(&"git_checkout_dot"));
-        assert!(pattern_names.contains(&"git_branch_force_delete"));
-        assert!(pattern_names.contains(&"git_stash_destructive"));
-        assert!(pattern_names.contains(&"rm_rf_root"));
+    fn pattern_registry_covers_all_patterns() {
+        // Ensure all expected patterns are in the default config
+        let config = GuardConfig::load_from_embedded();
+        let pattern_ids: Vec<&str> = config.patterns.iter().map(|p| p.id.as_str()).collect();
+
+        assert!(pattern_ids.contains(&"meta.git.force_push"));
+        assert!(pattern_ids.contains(&"meta.git.reset_hard"));
+        assert!(pattern_ids.contains(&"meta.git.clean_force"));
+        assert!(pattern_ids.contains(&"meta.git.checkout_dot"));
+        assert!(pattern_ids.contains(&"meta.git.branch_force_delete"));
+        assert!(pattern_ids.contains(&"meta.git.stash_drop"));
+        assert!(pattern_ids.contains(&"meta.git.stash_clear"));
+        assert!(pattern_ids.contains(&"meta.rm.dangerous_paths"));
     }
 
     #[test]
-    fn config_is_cached_across_evaluations() {
-        // First evaluation loads config
+    fn patterns_are_cached_across_evaluations() {
+        // First evaluation loads and compiles patterns
         let result1 = evaluate_command("git status");
         assert!(result1.is_none());
 
-        // Second evaluation should use cached config (no additional file I/O)
+        // Second evaluation should use cached patterns (no additional file I/O or compilation)
         let result2 = evaluate_command("git push --force");
         assert!(result2.is_some());
 
@@ -1297,5 +1207,40 @@ message = "TEAM POLICY: No force push ever!"
         let result = evaluate_command("git push --force");
         assert!(result.is_some());
         std::env::remove_var("META_DEBUG_GUARD");
+    }
+
+    #[test]
+    fn patterns_sorted_by_priority() {
+        let toml = r#"
+schema_version = "1.0"
+
+[[patterns]]
+id = "low"
+priority = 50
+enabled = true
+matcher = { type = "regex", pattern = 'test' }
+message = "low priority"
+
+[[patterns]]
+id = "high"
+priority = 200
+enabled = true
+matcher = { type = "regex", pattern = 'test' }
+message = "high priority"
+
+[[patterns]]
+id = "medium"
+priority = 100
+enabled = true
+matcher = { type = "regex", pattern = 'test' }
+message = "medium priority"
+"#;
+        let config: GuardConfig = toml::from_str(toml).unwrap();
+        let patterns = config.compile_patterns();
+
+        // Should be sorted by priority (highest first)
+        assert_eq!(patterns[0].priority, 200);
+        assert_eq!(patterns[1].priority, 100);
+        assert_eq!(patterns[2].priority, 50);
     }
 }
