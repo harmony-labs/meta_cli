@@ -36,10 +36,23 @@ fn load_cache() -> Option<CachedContext> {
     serde_json::from_slice(&content).ok()
 }
 
-fn save_cache(cached: &CachedContext) {
+fn save_cache(cached: &CachedContext, verbose: bool) {
     let path = cache_path();
-    if let Ok(json) = serde_json::to_vec(cached) {
-        let _ = std::fs::write(path, json);
+    match serde_json::to_vec(cached) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                if verbose {
+                    eprintln!("Failed to write context cache: {}", e);
+                }
+            } else if verbose {
+                eprintln!("Saved context cache to {}", path.display());
+            }
+        }
+        Err(e) => {
+            if verbose {
+                eprintln!("Failed to serialize context cache: {}", e);
+            }
+        }
     }
 }
 
@@ -50,11 +63,44 @@ fn is_cache_valid(cached: &CachedContext, current_root: &PathBuf) -> bool {
     }
 
     // Check TTL
-    if let Ok(elapsed) = SystemTime::now().duration_since(cached.timestamp) {
-        elapsed < Duration::from_secs(CACHE_TTL_SECONDS)
-    } else {
-        false
+    let elapsed = match SystemTime::now().duration_since(cached.timestamp) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+
+    if elapsed >= Duration::from_secs(CACHE_TTL_SECONDS) {
+        return false;
     }
+
+    // Check if git state changed in any repo
+    // If .git/HEAD or branch refs were modified after cache timestamp, invalidate
+    for repo in &cached.context.repos {
+        let repo_path = current_root.join(&repo.path);
+        let git_dir = repo_path.join(".git");
+
+        // Check .git/HEAD modification time
+        if let Ok(head_meta) = std::fs::metadata(git_dir.join("HEAD")) {
+            if let Ok(head_mtime) = head_meta.modified() {
+                if head_mtime > cached.timestamp {
+                    return false; // HEAD changed, invalidate
+                }
+            }
+        }
+
+        // Check branch ref file if we know the branch
+        if let Some(ref branch) = repo.branch {
+            let ref_path = git_dir.join("refs").join("heads").join(branch);
+            if let Ok(ref_meta) = std::fs::metadata(&ref_path) {
+                if let Ok(ref_mtime) = ref_meta.modified() {
+                    if ref_mtime > cached.timestamp {
+                        return false; // Branch ref changed, invalidate
+                    }
+                }
+            }
+        }
+    }
+
+    true
 }
 
 // ── Public API ──────────────────────────────────────────
@@ -147,7 +193,7 @@ pub fn handle_context(json: bool, no_status: bool, no_cache: bool, verbose: bool
             timestamp: SystemTime::now(),
             workspace_root: meta_dir,
         };
-        save_cache(&cached);
+        save_cache(&cached, verbose);
     }
 
     if json {
@@ -418,6 +464,58 @@ mod tests {
         assert_eq!(format_status(&r), "-");
     }
 
+    #[test]
+    fn status_ahead_only() {
+        let mut r = make_repo("x", Some("main"), Some(false), Some(0), vec![]);
+        r.ahead = Some(3);
+        assert_eq!(format_status(&r), "clean (↑3)");
+    }
+
+    #[test]
+    fn status_behind_only() {
+        let mut r = make_repo("x", Some("main"), Some(false), Some(0), vec![]);
+        r.behind = Some(2);
+        assert_eq!(format_status(&r), "clean (↓2)");
+    }
+
+    #[test]
+    fn status_ahead_and_behind() {
+        let mut r = make_repo("x", Some("main"), Some(false), Some(0), vec![]);
+        r.ahead = Some(5);
+        r.behind = Some(3);
+        assert_eq!(format_status(&r), "clean (↑5 ↓3)");
+    }
+
+    #[test]
+    fn status_dirty_with_ahead() {
+        let mut r = make_repo("x", Some("main"), Some(true), Some(4), vec![]);
+        r.ahead = Some(2);
+        assert_eq!(format_status(&r), "4 modified (↑2)");
+    }
+
+    #[test]
+    fn status_dirty_with_behind() {
+        let mut r = make_repo("x", Some("main"), Some(true), Some(1), vec![]);
+        r.behind = Some(7);
+        assert_eq!(format_status(&r), "1 modified (↓7)");
+    }
+
+    #[test]
+    fn status_dirty_with_ahead_and_behind() {
+        let mut r = make_repo("x", Some("main"), Some(true), Some(2), vec![]);
+        r.ahead = Some(1);
+        r.behind = Some(1);
+        assert_eq!(format_status(&r), "2 modified (↑1 ↓1)");
+    }
+
+    #[test]
+    fn status_zero_ahead_behind_not_shown() {
+        let mut r = make_repo("x", Some("main"), Some(false), Some(0), vec![]);
+        r.ahead = Some(0);
+        r.behind = Some(0);
+        assert_eq!(format_status(&r), "clean");
+    }
+
     // ── format_markdown ─────────────────────────────────
 
     #[test]
@@ -551,5 +649,180 @@ mod tests {
         let json = serde_json::to_string(&ctx).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["dependencies"]["api"][0], "core");
+    }
+
+    // ── is_cache_valid ──────────────────────────────────
+
+    #[test]
+    fn cache_valid_within_ttl_no_git_changes() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workspace_root = temp_dir.path().to_path_buf();
+
+        // Create a cached context with timestamp 10 seconds ago
+        let timestamp = SystemTime::now() - Duration::from_secs(10);
+        let cached = CachedContext {
+            context: make_ctx(vec![], None),
+            timestamp,
+            workspace_root: workspace_root.clone(),
+        };
+
+        // Should be valid (within 30s TTL, no repos to check)
+        assert!(is_cache_valid(&cached, &workspace_root));
+    }
+
+    #[test]
+    fn cache_invalid_when_ttl_expired() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workspace_root = temp_dir.path().to_path_buf();
+
+        // Create a cached context with timestamp 31 seconds ago (beyond TTL)
+        let timestamp = SystemTime::now() - Duration::from_secs(31);
+        let cached = CachedContext {
+            context: make_ctx(vec![], None),
+            timestamp,
+            workspace_root: workspace_root.clone(),
+        };
+
+        // Should be invalid (TTL expired)
+        assert!(!is_cache_valid(&cached, &workspace_root));
+    }
+
+    #[test]
+    fn cache_invalid_when_workspace_root_differs() {
+        let temp_dir1 = tempfile::tempdir().unwrap();
+        let temp_dir2 = tempfile::tempdir().unwrap();
+
+        let timestamp = SystemTime::now() - Duration::from_secs(10);
+        let cached = CachedContext {
+            context: make_ctx(vec![], None),
+            timestamp,
+            workspace_root: temp_dir1.path().to_path_buf(),
+        };
+
+        // Different workspace root should invalidate
+        assert!(!is_cache_valid(&cached, &temp_dir2.path().to_path_buf()));
+    }
+
+    #[test]
+    fn cache_invalid_when_git_head_changed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workspace_root = temp_dir.path().to_path_buf();
+
+        // Create a repo directory with .git/HEAD
+        let repo_path = workspace_root.join("test_repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        let git_dir = repo_path.join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+
+        // Create .git/HEAD with old timestamp
+        let head_file = git_dir.join("HEAD");
+        std::fs::write(&head_file, "ref: refs/heads/main\n").unwrap();
+
+        // Cache timestamp before HEAD file
+        let cache_time = head_file.metadata().unwrap().modified().unwrap() - Duration::from_secs(5);
+
+        let mut repo = make_repo("test_repo", Some("main"), Some(false), Some(0), vec![]);
+        repo.path = "test_repo".to_string();
+
+        let cached = CachedContext {
+            context: make_ctx(vec![repo], None),
+            timestamp: cache_time,
+            workspace_root: workspace_root.clone(),
+        };
+
+        // Should be invalid (HEAD modified after cache timestamp)
+        assert!(!is_cache_valid(&cached, &workspace_root));
+    }
+
+    #[test]
+    fn cache_invalid_when_branch_ref_changed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workspace_root = temp_dir.path().to_path_buf();
+
+        // Create a repo directory with .git/refs/heads/main
+        let repo_path = workspace_root.join("test_repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        let git_dir = repo_path.join(".git");
+        let refs_dir = git_dir.join("refs").join("heads");
+        std::fs::create_dir_all(&refs_dir).unwrap();
+
+        // Create branch ref with current timestamp
+        let main_ref = refs_dir.join("main");
+        std::fs::write(&main_ref, "abc123def456\n").unwrap();
+
+        // Cache timestamp before ref file
+        let cache_time = main_ref.metadata().unwrap().modified().unwrap() - Duration::from_secs(5);
+
+        let mut repo = make_repo("test_repo", Some("main"), Some(false), Some(0), vec![]);
+        repo.path = "test_repo".to_string();
+
+        let cached = CachedContext {
+            context: make_ctx(vec![repo], None),
+            timestamp: cache_time,
+            workspace_root: workspace_root.clone(),
+        };
+
+        // Should be invalid (branch ref modified after cache timestamp)
+        assert!(!is_cache_valid(&cached, &workspace_root));
+    }
+
+    #[test]
+    fn cache_valid_when_git_files_unchanged() {
+        use std::thread;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workspace_root = temp_dir.path().to_path_buf();
+
+        // Create a repo directory with .git/HEAD and branch ref
+        let repo_path = workspace_root.join("test_repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        let git_dir = repo_path.join(".git");
+        let refs_dir = git_dir.join("refs").join("heads");
+        std::fs::create_dir_all(&refs_dir).unwrap();
+
+        // Create files
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(refs_dir.join("main"), "abc123def456\n").unwrap();
+
+        // Small delay to ensure filesystem timestamp resolution
+        thread::sleep(Duration::from_millis(10));
+
+        // Cache timestamp AFTER files were created
+        let cache_time = SystemTime::now();
+
+        let mut repo = make_repo("test_repo", Some("main"), Some(false), Some(0), vec![]);
+        repo.path = "test_repo".to_string();
+
+        let cached = CachedContext {
+            context: make_ctx(vec![repo], None),
+            timestamp: cache_time,
+            workspace_root: workspace_root.clone(),
+        };
+
+        // Should be valid (files haven't changed since cache)
+        assert!(is_cache_valid(&cached, &workspace_root));
+    }
+
+    #[test]
+    fn cache_valid_when_git_dir_missing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workspace_root = temp_dir.path().to_path_buf();
+
+        // Create repo path but no .git directory
+        let repo_path = workspace_root.join("test_repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+
+        let timestamp = SystemTime::now() - Duration::from_secs(10);
+        let mut repo = make_repo("test_repo", Some("main"), Some(false), Some(0), vec![]);
+        repo.path = "test_repo".to_string();
+
+        let cached = CachedContext {
+            context: make_ctx(vec![repo], None),
+            timestamp,
+            workspace_root: workspace_root.clone(),
+        };
+
+        // Should be valid (missing .git is not an invalidation reason)
+        assert!(is_cache_valid(&cached, &workspace_root));
     }
 }

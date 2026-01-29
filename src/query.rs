@@ -21,6 +21,8 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
+use crate::git_utils;
+
 /// Represents a query filter condition
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueryCondition {
@@ -197,7 +199,9 @@ impl RepoState {
         let is_dirty = has_staged || has_unstaged || has_untracked;
 
         // Get ahead/behind
-        let (ahead, behind) = get_ahead_behind(path).unwrap_or((0, 0));
+        let (ahead, behind) = git_utils::ahead_behind(path)
+            .map(|(a, b)| (a as i32, b as i32))
+            .unwrap_or((0, 0));
 
         // Get last commit info
         let last_commit_hash = get_git_output(path, &["rev-parse", "HEAD"]).ok();
@@ -285,32 +289,6 @@ fn get_git_output(path: &Path, args: &[&str]) -> Result<String> {
     }
 }
 
-/// Get ahead/behind counts relative to tracking branch
-fn get_ahead_behind(path: &Path) -> Result<(i32, i32)> {
-    // Get tracking branch
-    let tracking = get_git_output(path, &["rev-parse", "--abbrev-ref", "@{upstream}"])?;
-    if tracking.is_empty() {
-        return Ok((0, 0));
-    }
-
-    let output = get_git_output(
-        path,
-        &[
-            "rev-list",
-            "--left-right",
-            "--count",
-            &format!("HEAD...{tracking}"),
-        ],
-    )?;
-    let parts: Vec<&str> = output.split_whitespace().collect();
-    if parts.len() == 2 {
-        let ahead = parts[0].parse().unwrap_or(0);
-        let behind = parts[1].parse().unwrap_or(0);
-        Ok((ahead, behind))
-    } else {
-        Ok((0, 0))
-    }
-}
 
 /// Detect build systems in a project directory
 fn detect_build_systems(path: &Path) -> Vec<String> {
