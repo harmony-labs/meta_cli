@@ -342,6 +342,7 @@ impl SubprocessPluginManager {
                 json_output: false,
                 spawn_stagger_ms: 0,
                 env: None,
+                max_parallel: None, // Pre-commands are sequential
             };
 
             for pre_cmd in &plan.pre_commands {
@@ -384,6 +385,7 @@ impl SubprocessPluginManager {
                 json_output: options.json_output,
                 spawn_stagger_ms: 0,
                 env: None,
+                max_parallel: plan.max_parallel,
             };
 
             run_commands(&config, &commands)?;
@@ -404,6 +406,7 @@ impl SubprocessPluginManager {
                 json_output: false,
                 spawn_stagger_ms: 0,
                 env: None,
+                max_parallel: None, // Post-commands are sequential
             };
 
             for post_cmd in &plan.post_commands {

@@ -58,6 +58,7 @@ fn test_loop_config_full_serialization_round_trip() {
         json_output: true,
         spawn_stagger_ms: 0,
         env: None,
+        max_parallel: Some(5),
     };
 
     let json = serde_json::to_string(&config).unwrap();
@@ -72,6 +73,7 @@ fn test_loop_config_full_serialization_round_trip() {
     assert_eq!(restored.parallel, config.parallel);
     assert_eq!(restored.dry_run, config.dry_run);
     assert_eq!(restored.json_output, config.json_output);
+    assert_eq!(restored.max_parallel, config.max_parallel);
 }
 
 /// Test that DirCommand allows different commands per directory
