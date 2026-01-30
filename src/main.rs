@@ -99,6 +99,13 @@ struct Cli {
     )]
     primary: bool,
 
+    #[arg(
+        long,
+        global = true,
+        help = "Convert warnings to errors for all-or-nothing behavior (CI/automation)"
+    )]
+    strict: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -383,6 +390,7 @@ fn handle_command_dispatch(
             depth: None,
             include_filters: None,
             exclude_filters: None,
+            strict: cli.strict,
         };
 
         if plugins.execute("git clone", &clone_args, &[], subprocess_options)? {
@@ -492,6 +500,7 @@ fn handle_command_dispatch(
                     depth,
                     include_filters: include_opt,
                     exclude_filters: exclude_opt,
+                    strict: cli.strict,
                 };
 
                 if plugins.execute(
@@ -636,6 +645,7 @@ fn handle_command_dispatch(
         depth,
         include_filters: include_opt,
         exclude_filters: exclude_opt,
+        strict: cli.strict,
     };
 
     if plugins.execute(
@@ -767,6 +777,7 @@ fn extract_global_flags(args: &mut Vec<String>, cli: &mut Cli) {
             "--silent" => { cli.silent = true; false }
             "--primary" => { cli.primary = true; false }
             "--recursive" => { cli.recursive = true; false }
+            "--strict" => { cli.strict = true; false }
             _ => true, // keep in args
         }
     });

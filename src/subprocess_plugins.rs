@@ -947,6 +947,7 @@ mod tests {
                 depth: Some(3),
                 include_filters: Some(vec!["frontend".to_string()]),
                 exclude_filters: Some(vec!["tests".to_string()]),
+                strict: false,
             },
         };
 
