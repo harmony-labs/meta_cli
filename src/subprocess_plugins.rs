@@ -324,6 +324,11 @@ impl SubprocessPluginManager {
 
         // Phase 1: Run pre_commands sequentially (setup tasks like SSH ControlMaster)
         if !plan.pre_commands.is_empty() {
+            if !options.silent {
+                use colored::Colorize;
+                eprintln!("{} Preparing connections...", "⟳".cyan());
+            }
+
             let pre_config = LoopConfig {
                 directories: vec![],
                 ignore: vec![],
