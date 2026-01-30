@@ -58,6 +58,14 @@ impl ProjectInfo {
     }
 }
 
+/// Default settings that can be configured in .meta
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct MetaDefaults {
+    /// Run commands in parallel by default
+    #[serde(default)]
+    pub parallel: bool,
+}
+
 /// The meta configuration file structure
 #[derive(Debug, Deserialize, Default)]
 pub struct MetaConfig {
@@ -65,6 +73,8 @@ pub struct MetaConfig {
     pub projects: HashMap<String, ProjectEntry>,
     #[serde(default)]
     pub ignore: Vec<String>,
+    #[serde(default)]
+    pub defaults: MetaDefaults,
 }
 
 /// Determines the format of a config file based on extension
@@ -184,6 +194,28 @@ pub fn parse_meta_config(
     projects.sort_by(|a, b| a.name.cmp(&b.name));
 
     Ok((projects, config.ignore))
+}
+
+/// Load defaults from a meta config file.
+/// Returns MetaDefaults::default() if no config found or on parse error.
+pub fn load_meta_defaults(start_dir: &Path) -> MetaDefaults {
+    let Some((config_path, _format)) = find_meta_config_in(start_dir) else {
+        return MetaDefaults::default();
+    };
+
+    let config_str = match std::fs::read_to_string(&config_path) {
+        Ok(s) => s,
+        Err(_) => return MetaDefaults::default(),
+    };
+
+    let path_str = config_path.to_string_lossy();
+    let config: MetaConfig = if path_str.ends_with(".yaml") || path_str.ends_with(".yml") {
+        serde_yaml::from_str(&config_str).unwrap_or_default()
+    } else {
+        serde_json::from_str(&config_str).unwrap_or_default()
+    };
+
+    config.defaults
 }
 
 // ============================================================================
@@ -506,5 +538,56 @@ mod tests {
         assert_eq!(tree[0].info.name, "myproject");
         assert_eq!(tree[0].info.path, "custom/path");
         assert_eq!(tree[0].info.tags, vec!["frontend", "react"]);
+    }
+
+    #[test]
+    fn test_load_meta_defaults_no_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let defaults = load_meta_defaults(dir.path());
+        assert!(!defaults.parallel);
+    }
+
+    #[test]
+    fn test_load_meta_defaults_no_defaults_section() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".meta"), r#"{"projects": {}}"#).unwrap();
+        let defaults = load_meta_defaults(dir.path());
+        assert!(!defaults.parallel);
+    }
+
+    #[test]
+    fn test_load_meta_defaults_parallel_true() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".meta"),
+            r#"{"projects": {}, "defaults": {"parallel": true}}"#,
+        )
+        .unwrap();
+        let defaults = load_meta_defaults(dir.path());
+        assert!(defaults.parallel);
+    }
+
+    #[test]
+    fn test_load_meta_defaults_parallel_false() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".meta"),
+            r#"{"projects": {}, "defaults": {"parallel": false}}"#,
+        )
+        .unwrap();
+        let defaults = load_meta_defaults(dir.path());
+        assert!(!defaults.parallel);
+    }
+
+    #[test]
+    fn test_load_meta_defaults_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".meta.yaml"),
+            "projects: {}\ndefaults:\n  parallel: true\n",
+        )
+        .unwrap();
+        let defaults = load_meta_defaults(dir.path());
+        assert!(defaults.parallel);
     }
 }

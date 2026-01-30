@@ -89,6 +89,9 @@ struct Cli {
     #[arg(long, global = true, help = "Run commands in parallel")]
     parallel: bool,
 
+    #[arg(long, global = true, help = "Run commands sequentially (overrides config default)")]
+    sequential: bool,
+
     #[arg(
         long,
         global = true,
@@ -342,7 +345,16 @@ fn handle_command_dispatch(
     let recursive = cli.recursive;
     let dry_run = cli.dry_run;
     let depth = cli.depth;
-    let parallel = cli.parallel;
+    // Determine parallel mode: --parallel wins, then --sequential, then config default
+    let parallel = if cli.parallel {
+        true
+    } else if cli.sequential {
+        false
+    } else {
+        // Load default from .meta config
+        let defaults = config::load_meta_defaults(&std::env::current_dir().unwrap_or_default());
+        defaults.parallel
+    };
 
     let command_str = command_args.join(" ");
 
