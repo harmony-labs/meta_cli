@@ -59,11 +59,21 @@ impl ProjectInfo {
 }
 
 /// Default settings that can be configured in .meta
-#[derive(Debug, Deserialize, Default, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct MetaDefaults {
-    /// Run commands in parallel by default
-    #[serde(default)]
+    /// Run commands in parallel by default (defaults to true)
+    #[serde(default = "default_true")]
     pub parallel: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for MetaDefaults {
+    fn default() -> Self {
+        Self { parallel: true }
+    }
 }
 
 /// The meta configuration file structure
@@ -544,7 +554,8 @@ mod tests {
     fn test_load_meta_defaults_no_config() {
         let dir = tempfile::tempdir().unwrap();
         let defaults = load_meta_defaults(dir.path());
-        assert!(!defaults.parallel);
+        // Defaults to parallel=true when no config exists
+        assert!(defaults.parallel);
     }
 
     #[test]
@@ -552,7 +563,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".meta"), r#"{"projects": {}}"#).unwrap();
         let defaults = load_meta_defaults(dir.path());
-        assert!(!defaults.parallel);
+        // Defaults to parallel=true when defaults section is missing
+        assert!(defaults.parallel);
     }
 
     #[test]
