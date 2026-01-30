@@ -322,36 +322,99 @@ impl SubprocessPluginManager {
     fn execute_plan(&self, plan: &ExecutionPlan, options: &PluginRequestOptions) -> Result<bool> {
         use loop_lib::{DirCommand, LoopConfig, run_commands};
 
-        if plan.commands.is_empty() {
-            return Ok(true); // Nothing to execute
+        // Phase 1: Run pre_commands sequentially (setup tasks like SSH ControlMaster)
+        if !plan.pre_commands.is_empty() {
+            let pre_config = LoopConfig {
+                directories: vec![],
+                ignore: vec![],
+                verbose: options.verbose,
+                silent: true, // Pre-commands run silently unless verbose
+                add_aliases_to_global_looprc: false,
+                include_filters: None,
+                exclude_filters: None,
+                parallel: false, // Sequential execution
+                dry_run: false,  // Pre-commands always run (setup is required)
+                json_output: false,
+                spawn_stagger_ms: 0,
+                env: None,
+            };
+
+            for pre_cmd in &plan.pre_commands {
+                let cmd = DirCommand {
+                    dir: pre_cmd.dir.clone(),
+                    cmd: pre_cmd.cmd.clone(),
+                    env: pre_cmd.env.clone(),
+                };
+                // Ignore failures for pre_commands (e.g., SSH socket already exists)
+                // The main commands will fail if setup was actually needed
+                if let Err(e) = run_commands(&pre_config, &[cmd]) {
+                    if options.verbose {
+                        eprintln!("Pre-command failed (continuing): {}", e);
+                    }
+                }
+            }
         }
 
-        // Convert plan commands to loop_lib DirCommand format
-        let commands: Vec<DirCommand> = plan.commands
-            .iter()
-            .map(|c| DirCommand {
-                dir: c.dir.clone(),
-                cmd: c.cmd.clone(),
-                env: c.env.clone(),
-            })
-            .collect();
+        // Phase 2: Run main commands (may be parallel)
+        if !plan.commands.is_empty() {
+            let commands: Vec<DirCommand> = plan.commands
+                .iter()
+                .map(|c| DirCommand {
+                    dir: c.dir.clone(),
+                    cmd: c.cmd.clone(),
+                    env: c.env.clone(),
+                })
+                .collect();
 
-        let config = LoopConfig {
-            directories: vec![], // Not used by run_commands
-            ignore: vec![],
-            verbose: options.verbose,
-            silent: options.silent,
-            add_aliases_to_global_looprc: false,
-            include_filters: options.include_filters.clone(),
-            exclude_filters: options.exclude_filters.clone(),
-            parallel: plan.parallel.unwrap_or(options.parallel),
-            dry_run: options.dry_run,
-            json_output: options.json_output,
-            spawn_stagger_ms: 0,
-            env: None, // Per-command env is set on individual DirCommands
-        };
+            let config = LoopConfig {
+                directories: vec![],
+                ignore: vec![],
+                verbose: options.verbose,
+                silent: options.silent,
+                add_aliases_to_global_looprc: false,
+                include_filters: options.include_filters.clone(),
+                exclude_filters: options.exclude_filters.clone(),
+                parallel: plan.parallel.unwrap_or(options.parallel),
+                dry_run: options.dry_run,
+                json_output: options.json_output,
+                spawn_stagger_ms: 0,
+                env: None,
+            };
 
-        run_commands(&config, &commands)?;
+            run_commands(&config, &commands)?;
+        }
+
+        // Phase 3: Run post_commands sequentially (cleanup tasks)
+        if !plan.post_commands.is_empty() {
+            let post_config = LoopConfig {
+                directories: vec![],
+                ignore: vec![],
+                verbose: options.verbose,
+                silent: true,
+                add_aliases_to_global_looprc: false,
+                include_filters: None,
+                exclude_filters: None,
+                parallel: false,
+                dry_run: false,
+                json_output: false,
+                spawn_stagger_ms: 0,
+                env: None,
+            };
+
+            for post_cmd in &plan.post_commands {
+                let cmd = DirCommand {
+                    dir: post_cmd.dir.clone(),
+                    cmd: post_cmd.cmd.clone(),
+                    env: post_cmd.env.clone(),
+                };
+                if let Err(e) = run_commands(&post_config, &[cmd]) {
+                    if options.verbose {
+                        eprintln!("Post-command failed: {}", e);
+                    }
+                }
+            }
+        }
+
         Ok(true)
     }
 
@@ -998,6 +1061,57 @@ mod tests {
         assert_eq!(plan.commands[1].cmd, "cargo build");
         assert_eq!(plan.commands[2].cmd, "python setup.py install");
         assert_eq!(plan.commands[3].cmd, "make html");
+    }
+
+    #[test]
+    fn test_execution_plan_with_pre_commands() {
+        // Test ExecutionPlan with pre_commands (e.g., SSH setup)
+        let json = r#"{
+            "pre_commands": [
+                {"dir": ".", "cmd": "ssh -fNM -o ControlMaster=auto git@github.com"}
+            ],
+            "commands": [
+                {"dir": "./repo1", "cmd": "git push"},
+                {"dir": "./repo2", "cmd": "git push"}
+            ],
+            "parallel": true
+        }"#;
+        let plan: ExecutionPlan = serde_json::from_str(json).unwrap();
+        assert_eq!(plan.pre_commands.len(), 1);
+        assert!(plan.pre_commands[0].cmd.contains("ssh"));
+        assert_eq!(plan.commands.len(), 2);
+        assert_eq!(plan.parallel, Some(true));
+    }
+
+    #[test]
+    fn test_execution_plan_with_post_commands() {
+        // Test ExecutionPlan with post_commands (e.g., cleanup)
+        let json = r#"{
+            "commands": [
+                {"dir": ".", "cmd": "make build"}
+            ],
+            "post_commands": [
+                {"dir": ".", "cmd": "make clean"}
+            ],
+            "parallel": false
+        }"#;
+        let plan: ExecutionPlan = serde_json::from_str(json).unwrap();
+        assert!(plan.pre_commands.is_empty());
+        assert_eq!(plan.commands.len(), 1);
+        assert_eq!(plan.post_commands.len(), 1);
+        assert!(plan.post_commands[0].cmd.contains("clean"));
+    }
+
+    #[test]
+    fn test_execution_plan_backward_compatible() {
+        // Test that old JSON without pre/post_commands still works
+        let json = r#"{
+            "commands": [{"dir": ".", "cmd": "ls"}]
+        }"#;
+        let plan: ExecutionPlan = serde_json::from_str(json).unwrap();
+        assert!(plan.pre_commands.is_empty());
+        assert!(plan.post_commands.is_empty());
+        assert_eq!(plan.commands.len(), 1);
     }
 
     #[test]
