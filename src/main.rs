@@ -487,6 +487,7 @@ fn handle_command_dispatch(
                     json_output: cli.json,
                     add_aliases_to_global_looprc: false,
                     spawn_stagger_ms: 0,
+                    env: None,
                 };
 
                 // Try plugin dispatch first (full feature parity with normal path)
@@ -550,6 +551,7 @@ fn handle_command_dispatch(
                 json_output: cli.json,
                 add_aliases_to_global_looprc: false,
                 spawn_stagger_ms: 0,
+                env: None,
             };
 
             run(&config, &command_str)?;
@@ -632,6 +634,7 @@ fn handle_command_dispatch(
         dry_run,
         json_output: cli.json,
         spawn_stagger_ms: 0,
+        env: None,
     };
 
     // Try subprocess plugins first (preferred)

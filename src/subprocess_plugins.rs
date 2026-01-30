@@ -348,6 +348,7 @@ impl SubprocessPluginManager {
             dry_run: options.dry_run,
             json_output: options.json_output,
             spawn_stagger_ms: 0,
+            env: None, // Per-command env is set on individual DirCommands
         };
 
         run_commands(&config, &commands)?;

@@ -57,6 +57,7 @@ fn test_loop_config_full_serialization_round_trip() {
         dry_run: true,
         json_output: true,
         spawn_stagger_ms: 0,
+        env: None,
     };
 
     let json = serde_json::to_string(&config).unwrap();
