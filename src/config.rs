@@ -179,6 +179,10 @@ pub fn parse_meta_config(
         })
         .collect();
 
+    // Sort projects alphabetically by name for deterministic order
+    let mut projects = projects;
+    projects.sort_by(|a, b| a.name.cmp(&b.name));
+
     Ok((projects, config.ignore))
 }
 
