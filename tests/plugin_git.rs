@@ -59,6 +59,7 @@ fn test_loop_config_full_serialization_round_trip() {
         spawn_stagger_ms: 0,
         env: None,
         max_parallel: Some(5),
+        root_dir: None,
     };
 
     let json = serde_json::to_string(&config).unwrap();

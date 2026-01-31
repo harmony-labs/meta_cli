@@ -343,6 +343,7 @@ impl SubprocessPluginManager {
                 spawn_stagger_ms: 0,
                 env: None,
                 max_parallel: None, // Pre-commands are sequential
+                root_dir: None,     // Pre-commands don't need "." display
             };
 
             for pre_cmd in &plan.pre_commands {
@@ -372,6 +373,9 @@ impl SubprocessPluginManager {
                 })
                 .collect();
 
+            // The first command's directory is the meta root (should display as ".")
+            let root_dir = commands.first().map(|c| PathBuf::from(&c.dir));
+
             let config = LoopConfig {
                 directories: vec![],
                 ignore: vec![],
@@ -386,6 +390,7 @@ impl SubprocessPluginManager {
                 spawn_stagger_ms: 0,
                 env: None,
                 max_parallel: plan.max_parallel,
+                root_dir,
             };
 
             run_commands(&config, &commands)?;
@@ -407,6 +412,7 @@ impl SubprocessPluginManager {
                 spawn_stagger_ms: 0,
                 env: None,
                 max_parallel: None, // Post-commands are sequential
+                root_dir: None,     // Post-commands don't need "." display
             };
 
             for post_cmd in &plan.post_commands {

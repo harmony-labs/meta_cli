@@ -495,6 +495,7 @@ fn handle_command_dispatch(
                     spawn_stagger_ms: 0,
                     env: None,
                     max_parallel: None,
+                    root_dir: None, // Worktree paths don't use "." convention
                 };
 
                 // Try plugin dispatch first (full feature parity with normal path)
@@ -560,6 +561,7 @@ fn handle_command_dispatch(
                 spawn_stagger_ms: 0,
                 env: None,
                 max_parallel: None,
+                root_dir: None, // Worktree paths don't use "." convention
             };
 
             run(&config, &command_str)?;
@@ -604,7 +606,8 @@ fn handle_command_dispatch(
         meta_projects.iter().collect()
     };
 
-    let mut project_paths = vec![".".to_string()];
+    let meta_dir_str = meta_dir.to_string_lossy().to_string();
+    let mut project_paths = vec![meta_dir_str.clone()];
     project_paths.extend(
         filtered_projects
             .iter()
@@ -618,7 +621,7 @@ fn handle_command_dispatch(
             println!("Recursive mode enabled, max depth: {}", depth_str);
         }
         let tree = config::walk_meta_tree(meta_dir, depth)?;
-        project_paths = vec![".".to_string()];
+        project_paths = vec![meta_dir_str.clone()];
         let flat = flatten_with_tag_filter(&tree, &cli.tag);
         project_paths.extend(
             flat.iter()
@@ -644,6 +647,7 @@ fn handle_command_dispatch(
         spawn_stagger_ms: 0,
         env: None,
         max_parallel: None,
+        root_dir: Some(meta_dir.to_path_buf()),
     };
 
     // Try subprocess plugins first (preferred)
