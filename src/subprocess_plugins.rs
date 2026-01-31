@@ -135,10 +135,12 @@ impl SubprocessPluginManager {
 
         match output {
             Ok(output) if output.status.success() => {
-                let info: PluginInfo =
-                    serde_json::from_slice(&output.stdout).with_context(|| {
-                        format!("Failed to parse plugin info from {}", path.display())
-                    })?;
+                // Try to parse as plugin info - silently skip if invalid JSON
+                // (e.g., meta-mcp is an MCP server, not a meta plugin)
+                let info: PluginInfo = match serde_json::from_slice(&output.stdout) {
+                    Ok(info) => info,
+                    Err(_) => return Ok(()), // Not a valid plugin, skip silently
+                };
 
                 if self.verbose {
                     println!(
