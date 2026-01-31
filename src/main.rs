@@ -178,11 +178,15 @@ struct InitArgs {
 
 #[derive(Subcommand)]
 enum InitCommands {
-    /// Install Claude Code skills for this meta repo
+    /// Install Claude Code skills, rules, and hooks for this meta repo
     Claude {
-        /// Overwrite existing skill files
+        /// Overwrite all existing files including settings
         #[arg(short, long)]
         force: bool,
+
+        /// Update skills and rules only, preserve settings
+        #[arg(short, long)]
+        update: bool,
     },
 }
 
@@ -292,7 +296,9 @@ fn main() -> Result<()> {
         Some(Commands::Init(args)) => {
             let cmd = match args.command {
                 None => init::InitCommand::None,
-                Some(InitCommands::Claude { force }) => init::InitCommand::Claude { force },
+                Some(InitCommands::Claude { force, update }) => {
+                    init::InitCommand::Claude { force, update }
+                }
             };
             init::handle_init_command(cmd, cli.verbose)
         }
