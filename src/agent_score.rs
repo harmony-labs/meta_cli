@@ -67,7 +67,9 @@ impl SessionFinder {
     ///
     /// Project hash is computed as the absolute path with `/` replaced by `-`.
     pub fn new(project_path: &Path) -> Result<Self> {
-        let abs_path = project_path.canonicalize().context("Failed to resolve project path")?;
+        let abs_path = project_path
+            .canonicalize()
+            .context("Failed to resolve project path")?;
         let hash = Self::compute_project_hash(&abs_path);
 
         let claude_dir = dirs::home_dir()
@@ -84,7 +86,9 @@ impl SessionFinder {
             );
         }
 
-        Ok(Self { project_dir: claude_dir })
+        Ok(Self {
+            project_dir: claude_dir,
+        })
     }
 
     /// Compute project hash: replace `/` with `-` in absolute path.
@@ -94,21 +98,23 @@ impl SessionFinder {
 
     /// Find the N most recent session transcripts (sorted by modified time).
     pub fn recent_sessions(&self, n: usize) -> Result<Vec<PathBuf>> {
-        let mut files: Vec<(PathBuf, std::time::SystemTime)> = std::fs::read_dir(&self.project_dir)?
-            .filter_map(|entry| entry.ok())
-            .filter(|e| {
-                e.path().extension().map(|s| s == "jsonl").unwrap_or(false)
-                    && !e.path()
-                        .file_name()
-                        .map(|n| n.to_string_lossy().starts_with("agent-"))
-                        .unwrap_or(false)
-            })
-            .filter_map(|e| {
-                let path = e.path();
-                let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
-                Some((path, modified))
-            })
-            .collect();
+        let mut files: Vec<(PathBuf, std::time::SystemTime)> =
+            std::fs::read_dir(&self.project_dir)?
+                .filter_map(|entry| entry.ok())
+                .filter(|e| {
+                    e.path().extension().map(|s| s == "jsonl").unwrap_or(false)
+                        && !e
+                            .path()
+                            .file_name()
+                            .map(|n| n.to_string_lossy().starts_with("agent-"))
+                            .unwrap_or(false)
+                })
+                .filter_map(|e| {
+                    let path = e.path();
+                    let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+                    Some((path, modified))
+                })
+                .collect();
 
         files.sort_by(|a, b| b.1.cmp(&a.1)); // Newest first
         Ok(files.into_iter().take(n).map(|(p, _)| p).collect())
@@ -158,7 +164,9 @@ struct Message {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ContentBlock {
-    Text { _text: String },
+    Text {
+        _text: String,
+    },
     ToolUse {
         _id: String,
         name: String,
@@ -242,7 +250,9 @@ pub fn parse_and_score(transcript_path: &Path) -> Result<SessionMetrics> {
             metrics.session_id = session_id;
 
             // Parse content as array of ContentBlock
-            if let Ok(content_array) = serde_json::from_value::<Vec<ContentBlock>>(message.content.clone()) {
+            if let Ok(content_array) =
+                serde_json::from_value::<Vec<ContentBlock>>(message.content.clone())
+            {
                 for content in content_array {
                     if let ContentBlock::ToolUse { name, input, .. } = content {
                         if name == "Bash" {
@@ -441,9 +451,12 @@ pub fn compute_score(metrics: SessionMetrics) -> SessionScore {
         let protected_count = commit_ranks
             .iter()
             .filter(|&&commit_rank| {
-                metrics.meta_status_before_commit.iter().any(|&status_rank| {
-                    status_rank < commit_rank && (commit_rank - status_rank) <= 10
-                })
+                metrics
+                    .meta_status_before_commit
+                    .iter()
+                    .any(|&status_rank| {
+                        status_rank < commit_rank && (commit_rank - status_rank) <= 10
+                    })
             })
             .count();
 
@@ -599,10 +612,12 @@ pub fn format_markdown(score: &SessionScore) -> String {
     ));
     out.push_str(&format!(
         "- Destructive ops: {} ({} protected)\n",
-        score.metrics.destructive_ops_detected,
-        score.metrics.snapshots_before_destructive
+        score.metrics.destructive_ops_detected, score.metrics.snapshots_before_destructive
     ));
-    out.push_str(&format!("- Commits: {}\n\n", score.metrics.commits_attempted));
+    out.push_str(&format!(
+        "- Commits: {}\n\n",
+        score.metrics.commits_attempted
+    ));
 
     out.push_str("## Suggestions\n\n");
     for suggestion in &score.suggestions {

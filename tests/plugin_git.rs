@@ -9,7 +9,7 @@ use tempfile::tempdir;
 /// Test that loop_lib properly respects dry_run flag throughout the execution chain
 #[test]
 fn test_dry_run_integration_loop_lib() {
-    use loop_lib::{run, DirCommand, LoopConfig, run_commands};
+    use loop_lib::{run, run_commands, DirCommand, LoopConfig};
 
     let dir = tempdir().unwrap();
     let marker_file = dir.path().join("should_not_exist.txt");
@@ -25,7 +25,10 @@ fn test_dry_run_integration_loop_lib() {
     let cmd = format!("touch {}", marker_file.display());
     let result = run(&config, &cmd);
     assert!(result.is_ok(), "dry_run should succeed");
-    assert!(!marker_file.exists(), "dry_run should NOT create file via run()");
+    assert!(
+        !marker_file.exists(),
+        "dry_run should NOT create file via run()"
+    );
 
     // Test dry_run with run_commands() function
     let marker_file2 = dir.path().join("also_should_not_exist.txt");
@@ -37,7 +40,10 @@ fn test_dry_run_integration_loop_lib() {
 
     let result = run_commands(&config, &commands);
     assert!(result.is_ok(), "dry_run should succeed");
-    assert!(!marker_file2.exists(), "dry_run should NOT create file via run_commands()");
+    assert!(
+        !marker_file2.exists(),
+        "dry_run should NOT create file via run_commands()"
+    );
 }
 
 /// Test that LoopConfig properly serializes/deserializes with all new fields
@@ -80,7 +86,7 @@ fn test_loop_config_full_serialization_round_trip() {
 /// Test that DirCommand allows different commands per directory
 #[test]
 fn test_different_commands_per_directory() {
-    use loop_lib::{DirCommand, LoopConfig, run_commands};
+    use loop_lib::{run_commands, DirCommand, LoopConfig};
 
     let dir = tempdir().unwrap();
     let dir1 = dir.path().join("project_a");
@@ -166,8 +172,8 @@ fn test_plugin_request_options_dry_run_propagation() {
 
     // Verify the JSON can be parsed as generic Value (plugin side validation)
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed["dry_run"].as_bool().unwrap(), true);
-    assert_eq!(parsed["json_output"].as_bool().unwrap(), false);
+    assert!(parsed["dry_run"].as_bool().unwrap());
+    assert!(!parsed["json_output"].as_bool().unwrap());
 }
 
 /// Test that silent and filter options propagate correctly
@@ -213,14 +219,16 @@ fn test_dir_command_conversion() {
 /// Test that parallel execution works correctly with different commands
 #[test]
 fn test_parallel_execution_with_different_commands() {
-    use loop_lib::{DirCommand, LoopConfig, run_commands};
+    use loop_lib::{run_commands, DirCommand, LoopConfig};
 
     let dir = tempdir().unwrap();
-    let dirs: Vec<_> = (0..5).map(|i| {
-        let d = dir.path().join(format!("dir{}", i));
-        fs::create_dir(&d).unwrap();
-        d
-    }).collect();
+    let dirs: Vec<_> = (0..5)
+        .map(|i| {
+            let d = dir.path().join(format!("dir{i}"));
+            fs::create_dir(&d).unwrap();
+            d
+        })
+        .collect();
 
     let config = LoopConfig {
         parallel: true,
@@ -229,29 +237,37 @@ fn test_parallel_execution_with_different_commands() {
     };
 
     // Each directory gets a different command
-    let commands: Vec<DirCommand> = dirs.iter().enumerate().map(|(i, d)| {
-        let file = d.join(format!("file{}.txt", i));
-        DirCommand {
-            dir: d.to_str().unwrap().to_string(),
-            cmd: format!("touch {}", file.display()),
-            env: None,
-        }
-    }).collect();
+    let commands: Vec<DirCommand> = dirs
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
+            let file = d.join(format!("file{i}.txt"));
+            DirCommand {
+                dir: d.to_str().unwrap().to_string(),
+                cmd: format!("touch {}", file.display()),
+                env: None,
+            }
+        })
+        .collect();
 
     let result = run_commands(&config, &commands);
     assert!(result.is_ok());
 
     // Verify all files were created
     for (i, d) in dirs.iter().enumerate() {
-        let file = d.join(format!("file{}.txt", i));
-        assert!(file.exists(), "File {} should exist after parallel execution", file.display());
+        let file = d.join(format!("file{i}.txt"));
+        assert!(
+            file.exists(),
+            "File {} should exist after parallel execution",
+            file.display()
+        );
     }
 }
 
 /// Test that empty command list succeeds without errors
 #[test]
 fn test_empty_execution_plan() {
-    use loop_lib::{DirCommand, LoopConfig, run_commands};
+    use loop_lib::{run_commands, DirCommand, LoopConfig};
 
     let config = LoopConfig::default();
     let commands: Vec<DirCommand> = vec![];
@@ -289,13 +305,20 @@ fn test_backward_compatibility_config_parsing() {
 #[test]
 fn test_git_clone_bootstrap_detection() {
     // Simulate command parsing logic from main.rs
-    let commands: Vec<String> = vec!["git".to_string(), "clone".to_string(), "git@github.com:example/repo.git".to_string()];
+    let commands: Vec<String> = vec![
+        "git".to_string(),
+        "clone".to_string(),
+        "git@github.com:example/repo.git".to_string(),
+    ];
 
     // This is the detection logic from main.rs
     let is_git_clone_bootstrap = commands.first().map(|s| s == "git").unwrap_or(false)
         && commands.get(1).map(|s| s == "clone").unwrap_or(false);
 
-    assert!(is_git_clone_bootstrap, "Should detect 'git clone' as bootstrap command");
+    assert!(
+        is_git_clone_bootstrap,
+        "Should detect 'git clone' as bootstrap command"
+    );
 
     // Test that args are correctly extracted (everything after 'git clone')
     let clone_args: Vec<String> = commands.iter().skip(2).cloned().collect();
@@ -322,7 +345,15 @@ fn test_git_clone_bootstrap_with_options() {
 
     let clone_args: Vec<String> = commands.iter().skip(2).cloned().collect();
     assert_eq!(clone_args.len(), 4);
-    assert_eq!(clone_args, vec!["--depth", "1", "git@github.com:example/repo.git", "target-dir"]);
+    assert_eq!(
+        clone_args,
+        vec![
+            "--depth",
+            "1",
+            "git@github.com:example/repo.git",
+            "target-dir"
+        ]
+    );
 }
 
 /// Test that non-clone git commands are not detected as bootstrap
@@ -341,7 +372,10 @@ fn test_git_non_clone_not_bootstrap() {
         let is_git_clone_bootstrap = commands.first().map(|s| s == "git").unwrap_or(false)
             && commands.get(1).map(|s| s == "clone").unwrap_or(false);
 
-        assert!(!is_git_clone_bootstrap, "Command {:?} should NOT be detected as git clone bootstrap", commands);
+        assert!(
+            !is_git_clone_bootstrap,
+            "Command {commands:?} should NOT be detected as git clone bootstrap"
+        );
     }
 }
 

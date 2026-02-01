@@ -86,7 +86,7 @@ impl Query {
     fn parse_condition(s: &str) -> Result<QueryCondition> {
         let parts: Vec<&str> = s.splitn(2, ':').collect();
         if parts.len() != 2 {
-            anyhow::bail!("Invalid condition format: '{}'. Expected 'field:value'", s);
+            anyhow::bail!("Invalid condition format: '{s}'. Expected 'field:value'");
         }
 
         let field = parts[0].trim().to_lowercase();
@@ -120,7 +120,7 @@ impl Query {
                     .with_context(|| format!("Invalid boolean value: '{value}'"))?;
                 Ok(QueryCondition::BehindRemote(behind))
             }
-            _ => anyhow::bail!("Unknown query field: '{}'. Valid fields: dirty, branch, tag, modified_in, language, has_unpushed, ahead, behind", field),
+            _ => anyhow::bail!("Unknown query field: '{field}'. Valid fields: dirty, branch, tag, modified_in, language, has_unpushed, ahead, behind"),
         }
     }
 }
@@ -150,10 +150,7 @@ fn parse_duration(s: &str) -> Result<Duration> {
             .with_context(|| format!("Invalid weeks value: '{s}'"))?;
         Ok(Duration::from_secs(weeks * 604800))
     } else {
-        anyhow::bail!(
-            "Invalid duration format: '{}'. Use format like '24h', '7d', '30m', '2w'",
-            s
-        )
+        anyhow::bail!("Invalid duration format: '{s}'. Use format like '24h', '7d', '30m', '2w'")
     }
 }
 
@@ -288,7 +285,6 @@ fn get_git_output(path: &Path, args: &[&str]) -> Result<String> {
         )
     }
 }
-
 
 /// Detect build systems in a project directory
 fn detect_build_systems(path: &Path) -> Vec<String> {

@@ -163,7 +163,7 @@ impl RegistryClient {
             }
         }
 
-        anyhow::bail!("Plugin '{}' not found in any registry", name)
+        anyhow::bail!("Plugin '{name}' not found in any registry")
     }
 
     /// Search for plugins matching a query
@@ -357,7 +357,7 @@ impl PluginInstaller {
                 }
             }
         } else {
-            anyhow::bail!("Unsupported archive format: {}", url);
+            anyhow::bail!("Unsupported archive format: {url}");
         }
 
         Ok(())
@@ -402,7 +402,7 @@ impl PluginInstaller {
             }
             Ok(())
         } else {
-            anyhow::bail!("Plugin {} is not installed", plugin_name)
+            anyhow::bail!("Plugin {plugin_name} is not installed")
         }
     }
 }

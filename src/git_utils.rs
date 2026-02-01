@@ -70,7 +70,7 @@ pub fn ahead_behind(repo_path: &Path) -> Option<(usize, usize)> {
             "rev-list",
             "--left-right",
             "--count",
-            &format!("HEAD...{}", upstream),
+            &format!("HEAD...{upstream}"),
         ],
     )?;
 

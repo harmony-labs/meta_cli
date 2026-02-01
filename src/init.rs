@@ -415,7 +415,12 @@ fn register_marketplace(verbose: bool) {
 
     // Register the marketplace (idempotent)
     let result = Command::new("claude")
-        .args(["plugin", "marketplace", "add", "harmony-labs/claude-plugins"])
+        .args([
+            "plugin",
+            "marketplace",
+            "add",
+            "harmony-labs/claude-plugins",
+        ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
@@ -423,10 +428,7 @@ fn register_marketplace(verbose: bool) {
     match result {
         Ok(status) if status.success() => {
             println!();
-            println!(
-                "{} Registered Harmony Labs plugin marketplace",
-                "✓".green()
-            );
+            println!("{} Registered Harmony Labs plugin marketplace", "✓".green());
             println!(
                 "  Run {} for global plugin access",
                 "claude plugin install meta@harmony-labs".cyan()
@@ -537,7 +539,10 @@ mod tests {
         // Settings should be MERGED (not overwritten, not skipped)
         let settings_content = fs::read_to_string(&existing_settings).unwrap();
         let settings: Value = serde_json::from_str(&settings_content).unwrap();
-        assert!(settings.get("custom").is_some(), "should preserve custom key");
+        assert!(
+            settings.get("custom").is_some(),
+            "should preserve custom key"
+        );
         assert!(settings.get("hooks").is_some(), "should add hooks");
     }
 

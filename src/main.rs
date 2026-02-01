@@ -89,7 +89,11 @@ struct Cli {
     #[arg(long, global = true, help = "Run commands in parallel")]
     parallel: bool,
 
-    #[arg(long, global = true, help = "Run commands sequentially (overrides config default)")]
+    #[arg(
+        long,
+        global = true,
+        help = "Run commands sequentially (overrides config default)"
+    )]
     sequential: bool,
 
     #[arg(
@@ -285,7 +289,9 @@ fn main() -> Result<()> {
                 eprintln!("Usage: meta agent <command>");
                 eprintln!();
                 eprintln!("Commands:");
-                eprintln!("  guard   Evaluate a command for destructive patterns (PreToolUse hook)");
+                eprintln!(
+                    "  guard   Evaluate a command for destructive patterns (PreToolUse hook)"
+                );
                 eprintln!("  score   Score Claude Code sessions for agent effectiveness");
                 Ok(())
             }
@@ -369,7 +375,11 @@ fn handle_command_dispatch(
         // Load default from .meta config (defaults to parallel: true if not specified)
         let cwd = std::env::current_dir().unwrap_or_default();
         let defaults = config::load_meta_defaults(&cwd);
-        log::debug!("parallel={} (from config defaults, cwd={})", defaults.parallel, cwd.display());
+        log::debug!(
+            "parallel={} (from config defaults, cwd={})",
+            defaults.parallel,
+            cwd.display()
+        );
         defaults.parallel
     };
 
@@ -377,14 +387,8 @@ fn handle_command_dispatch(
 
     // Check if this is `git clone` - it doesn't require a .meta file because
     // its purpose is to clone the repo that contains the .meta file
-    let is_git_clone = command_args
-        .first()
-        .map(|s| s == "git")
-        .unwrap_or(false)
-        && command_args
-            .get(1)
-            .map(|s| s == "clone")
-            .unwrap_or(false);
+    let is_git_clone = command_args.first().map(|s| s == "git").unwrap_or(false)
+        && command_args.get(1).map(|s| s == "clone").unwrap_or(false);
 
     if is_git_clone {
         // Handle git clone directly via plugin without requiring .meta file
@@ -431,16 +435,12 @@ fn handle_command_dispatch(
             }
 
             // Try to find .meta config for full feature support
-            if let Some((config_path, _format)) =
-                find_meta_config(&task_dir, cli.config.as_ref())
-            {
+            if let Some((config_path, _format)) = find_meta_config(&task_dir, cli.config.as_ref()) {
                 let (meta_projects, ignore_list) = parse_meta_config(&config_path)?;
 
                 // Build name→info lookup for tag filtering
-                let project_map: std::collections::HashMap<&str, &ProjectInfo> = meta_projects
-                    .iter()
-                    .map(|p| (p.name.as_str(), p))
-                    .collect();
+                let project_map: std::collections::HashMap<&str, &ProjectInfo> =
+                    meta_projects.iter().map(|p| (p.name.as_str(), p)).collect();
 
                 // Derive aliases from worktree paths and filter by tags
                 let wt_directories: Vec<String> = wt_paths
@@ -600,7 +600,10 @@ fn handle_command_dispatch(
     // Filter projects by tags if --tag is specified
     let filtered_projects: Vec<&ProjectInfo> = if let Some(ref tag_filter) = cli.tag {
         if cli.verbose {
-            println!("Filtering projects by tags: {:?}", tag_filter.split(',').map(|s| s.trim()).collect::<Vec<_>>());
+            println!(
+                "Filtering projects by tags: {:?}",
+                tag_filter.split(',').map(|s| s.trim()).collect::<Vec<_>>()
+            );
         }
         meta_projects
             .iter()
@@ -622,7 +625,7 @@ fn handle_command_dispatch(
     if recursive {
         if cli.verbose {
             let depth_str = depth.map_or("unlimited".to_string(), |d| d.to_string());
-            println!("Recursive mode enabled, max depth: {}", depth_str);
+            println!("Recursive mode enabled, max depth: {depth_str}");
         }
         let tree = config::walk_meta_tree(meta_dir, depth)?;
         project_paths = vec![meta_dir_str.clone()];
@@ -682,10 +685,7 @@ fn handle_command_dispatch(
         // User explicitly requested exec, run the command in all repos
         log::info!("Explicit exec requested, running command via loop");
         if cli.verbose {
-            println!(
-                "{}",
-                "Running command via loop (explicit exec).".green()
-            );
+            println!("{}", "Running command via loop (explicit exec).".green());
         }
         run(&config, &command_str)?;
     } else {
@@ -792,12 +792,30 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
 fn extract_global_flags(args: &mut Vec<String>, cli: &mut Cli) {
     args.retain(|arg| {
         match arg.as_str() {
-            "--json" => { cli.json = true; false }
-            "--verbose" => { cli.verbose = true; false }
-            "--silent" => { cli.silent = true; false }
-            "--primary" => { cli.primary = true; false }
-            "--recursive" => { cli.recursive = true; false }
-            "--strict" => { cli.strict = true; false }
+            "--json" => {
+                cli.json = true;
+                false
+            }
+            "--verbose" => {
+                cli.verbose = true;
+                false
+            }
+            "--silent" => {
+                cli.silent = true;
+                false
+            }
+            "--primary" => {
+                cli.primary = true;
+                false
+            }
+            "--recursive" => {
+                cli.recursive = true;
+                false
+            }
+            "--strict" => {
+                cli.strict = true;
+                false
+            }
             _ => true, // keep in args
         }
     });
@@ -811,7 +829,11 @@ fn matches_tag_filter(tags: &[String], filter: &str) -> bool {
 
 /// Convert an empty Vec into None, non-empty into Some.
 fn none_if_empty(v: Vec<String>) -> Option<Vec<String>> {
-    if v.is_empty() { None } else { Some(v) }
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
 }
 
 /// Print unrecognized command error with suggestion and help, then exit.

@@ -138,9 +138,7 @@ fn source_repo_from_gitfile(git_file: &Path) -> Result<PathBuf> {
     let dot_git_dir = gitdir_path
         .parent() // strip worktree name
         .and_then(|p| p.parent()) // strip "worktrees"
-        .ok_or_else(|| {
-            anyhow::anyhow!("Cannot derive source repo from gitdir: {gitdir}")
-        })?;
+        .ok_or_else(|| anyhow::anyhow!("Cannot derive source repo from gitdir: {gitdir}"))?;
 
     // dot_git_dir is now the .git directory; parent is the repo root
     let repo_root = dot_git_dir.parent().ok_or_else(|| {
@@ -152,4 +150,3 @@ fn source_repo_from_gitfile(git_file: &Path) -> Result<PathBuf> {
 
     Ok(repo_root.to_path_buf())
 }
-

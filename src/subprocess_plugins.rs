@@ -10,8 +10,8 @@ use std::process::{Command, Stdio};
 
 #[allow(unused_imports)]
 pub use meta_plugin_protocol::{
-    ExecutionPlan, PlannedCommand, PluginHelp, PluginInfo, PluginRequest, PluginRequestOptions,
-    PlanResponse as PluginResponse,
+    ExecutionPlan, PlanResponse as PluginResponse, PlannedCommand, PluginHelp, PluginInfo,
+    PluginRequest, PluginRequestOptions,
 };
 
 /// A discovered subprocess plugin
@@ -180,7 +180,7 @@ impl SubprocessPluginManager {
         for plugin in self.plugins.values() {
             for plugin_cmd in &plugin.info.commands {
                 // Check if the input command starts with this plugin command
-                if command == plugin_cmd || command.starts_with(&format!("{} ", plugin_cmd)) {
+                if command == plugin_cmd || command.starts_with(&format!("{plugin_cmd} ")) {
                     return true;
                 }
                 // Also check single-word match for fallback
@@ -212,7 +212,7 @@ impl SubprocessPluginManager {
         for plugin in self.plugins.values() {
             for plugin_cmd in &plugin.info.commands {
                 // Check if the input command starts with this plugin command
-                if command == plugin_cmd || command.starts_with(&format!("{} ", plugin_cmd)) {
+                if command == plugin_cmd || command.starts_with(&format!("{plugin_cmd} ")) {
                     let cmd_len = plugin_cmd.split_whitespace().count();
                     if cmd_len > best_match_len {
                         best_match = Some((plugin, plugin_cmd));
@@ -302,7 +302,7 @@ impl SubprocessPluginManager {
 
         // If stdout doesn't look like JSON, print it (legacy plugin output)
         if !stdout_str.trim().starts_with('{') {
-            print!("{}", stdout_str);
+            print!("{stdout_str}");
             return Ok(true);
         }
 
@@ -314,7 +314,7 @@ impl SubprocessPluginManager {
             }
             Err(_) => {
                 // Couldn't parse as our protocol - print output as-is (legacy behavior)
-                print!("{}", stdout_str);
+                print!("{stdout_str}");
                 Ok(true)
             }
         }
@@ -322,7 +322,7 @@ impl SubprocessPluginManager {
 
     /// Execute an execution plan via loop_lib
     fn execute_plan(&self, plan: &ExecutionPlan, options: &PluginRequestOptions) -> Result<bool> {
-        use loop_lib::{DirCommand, LoopConfig, run_commands};
+        use loop_lib::{run_commands, DirCommand, LoopConfig};
 
         // Phase 1: Run pre_commands sequentially (setup tasks like SSH ControlMaster)
         if !plan.pre_commands.is_empty() {
@@ -358,7 +358,7 @@ impl SubprocessPluginManager {
                 // The main commands will fail if setup was actually needed
                 if let Err(e) = run_commands(&pre_config, &[cmd]) {
                     if options.verbose {
-                        eprintln!("Pre-command failed (continuing): {}", e);
+                        eprintln!("Pre-command failed (continuing): {e}");
                     }
                 }
             }
@@ -366,7 +366,8 @@ impl SubprocessPluginManager {
 
         // Phase 2: Run main commands (may be parallel)
         if !plan.commands.is_empty() {
-            let commands: Vec<DirCommand> = plan.commands
+            let commands: Vec<DirCommand> = plan
+                .commands
                 .iter()
                 .map(|c| DirCommand {
                     dir: c.dir.clone(),
@@ -425,7 +426,7 @@ impl SubprocessPluginManager {
                 };
                 if let Err(e) = run_commands(&post_config, &[cmd]) {
                     if options.verbose {
-                        eprintln!("Post-command failed: {}", e);
+                        eprintln!("Post-command failed: {e}");
                     }
                 }
             }
@@ -985,7 +986,10 @@ mod tests {
     fn test_planned_command_complex_command() {
         let json = r#"{"dir": ".", "cmd": "git clone https://github.com/org/repo.git --depth 1"}"#;
         let cmd: PlannedCommand = serde_json::from_str(json).unwrap();
-        assert_eq!(cmd.cmd, "git clone https://github.com/org/repo.git --depth 1");
+        assert_eq!(
+            cmd.cmd,
+            "git clone https://github.com/org/repo.git --depth 1"
+        );
     }
 
     // ============ PluginRequest with dry_run Tests ============

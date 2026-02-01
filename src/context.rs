@@ -42,7 +42,7 @@ fn save_cache(cached: &CachedContext, verbose: bool) {
         Ok(json) => {
             if let Err(e) = std::fs::write(&path, json) {
                 if verbose {
-                    eprintln!("Failed to write context cache: {}", e);
+                    eprintln!("Failed to write context cache: {e}");
                 }
             } else if verbose {
                 eprintln!("Saved context cache to {}", path.display());
@@ -50,7 +50,7 @@ fn save_cache(cached: &CachedContext, verbose: bool) {
         }
         Err(e) => {
             if verbose {
-                eprintln!("Failed to serialize context cache: {}", e);
+                eprintln!("Failed to serialize context cache: {e}");
             }
         }
     }
@@ -122,7 +122,7 @@ pub fn handle_context(json: bool, no_status: bool, no_cache: bool, verbose: bool
         if let Some(cached) = load_cache() {
             if is_cache_valid(&cached, &meta_dir) {
                 if verbose {
-                    eprintln!("Using cached context (age < {}s)", CACHE_TTL_SECONDS);
+                    eprintln!("Using cached context (age < {CACHE_TTL_SECONDS}s)");
                 }
                 if json {
                     println!("{}", serde_json::to_string_pretty(&cached.context)?);
@@ -179,7 +179,9 @@ pub fn handle_context(json: bool, no_status: bool, no_cache: bool, verbose: bool
 
     let ctx = WorkspaceContext {
         name: workspace_name,
-        description: "Multi-repo workspace managed by `meta`. Use `meta` commands for cross-repo operations.".to_string(),
+        description:
+            "Multi-repo workspace managed by `meta`. Use `meta` commands for cross-repo operations."
+                .to_string(),
         repo_count: repos.len(),
         repos,
         commands: key_commands(),
@@ -400,9 +402,9 @@ fn format_status(r: &RepoContext) -> String {
 
     // Add ahead/behind indicator
     match (r.ahead, r.behind) {
-        (Some(a), Some(b)) if a > 0 && b > 0 => format!("{} (↑{} ↓{})", base, a, b),
-        (Some(a), _) if a > 0 => format!("{} (↑{})", base, a),
-        (_, Some(b)) if b > 0 => format!("{} (↓{})", base, b),
+        (Some(a), Some(b)) if a > 0 && b > 0 => format!("{base} (↑{a} ↓{b})"),
+        (Some(a), _) if a > 0 => format!("{base} (↑{a})"),
+        (_, Some(b)) if b > 0 => format!("{base} (↓{b})"),
         _ => base,
     }
 }
@@ -413,7 +415,10 @@ fn format_status(r: &RepoContext) -> String {
 mod tests {
     use super::*;
 
-    fn make_ctx(repos: Vec<RepoContext>, deps: Option<HashMap<String, Vec<String>>>) -> WorkspaceContext {
+    fn make_ctx(
+        repos: Vec<RepoContext>,
+        deps: Option<HashMap<String, Vec<String>>>,
+    ) -> WorkspaceContext {
         WorkspaceContext {
             name: "test-workspace".to_string(),
             description: "Multi-repo workspace managed by `meta`. Use `meta` commands for cross-repo operations.".to_string(),
@@ -424,7 +429,13 @@ mod tests {
         }
     }
 
-    fn make_repo(name: &str, branch: Option<&str>, dirty: Option<bool>, modified: Option<usize>, tags: Vec<&str>) -> RepoContext {
+    fn make_repo(
+        name: &str,
+        branch: Option<&str>,
+        dirty: Option<bool>,
+        modified: Option<usize>,
+        tags: Vec<&str>,
+    ) -> RepoContext {
         RepoContext {
             name: name.to_string(),
             path: name.to_string(),
@@ -547,7 +558,13 @@ mod tests {
     #[test]
     fn markdown_includes_tags_column_when_present() {
         let ctx = make_ctx(
-            vec![make_repo("api", Some("main"), Some(false), Some(0), vec!["backend"])],
+            vec![make_repo(
+                "api",
+                Some("main"),
+                Some(false),
+                Some(0),
+                vec!["backend"],
+            )],
             None,
         );
         let md = format_markdown(&ctx);
@@ -600,7 +617,13 @@ mod tests {
     #[test]
     fn json_serializes_full_context() {
         let ctx = make_ctx(
-            vec![make_repo("api", Some("main"), Some(false), Some(0), vec!["backend"])],
+            vec![make_repo(
+                "api",
+                Some("main"),
+                Some(false),
+                Some(0),
+                vec!["backend"],
+            )],
             None,
         );
         let json = serde_json::to_string(&ctx).unwrap();
@@ -617,10 +640,7 @@ mod tests {
 
     #[test]
     fn json_omits_none_fields() {
-        let ctx = make_ctx(
-            vec![make_repo("api", None, None, None, vec![])],
-            None,
-        );
+        let ctx = make_ctx(vec![make_repo("api", None, None, None, vec![])], None);
         let json = serde_json::to_string(&ctx).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(v["repos"][0].get("branch").is_none());

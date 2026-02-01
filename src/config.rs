@@ -154,9 +154,7 @@ pub fn find_meta_config(
 }
 
 /// Parse a meta config file (JSON or YAML) and return normalized project info and ignore list.
-pub fn parse_meta_config(
-    meta_path: &Path,
-) -> anyhow::Result<(Vec<ProjectInfo>, Vec<String>)> {
+pub fn parse_meta_config(meta_path: &Path) -> anyhow::Result<(Vec<ProjectInfo>, Vec<String>)> {
     let config_str = std::fs::read_to_string(meta_path)
         .with_context(|| format!("Failed to read meta config file: '{}'", meta_path.display()))?;
 
@@ -303,11 +301,7 @@ fn walk_inner(
         // Check if this project has its own .meta file directly in its directory
         let has_meta = project_dir.is_dir()
             && find_meta_config(&project_dir, None)
-                .map(|(path, _)| {
-                    path.parent()
-                        .map(|p| p == project_dir)
-                        .unwrap_or(false)
-                })
+                .map(|(path, _)| path.parent().map(|p| p == project_dir).unwrap_or(false))
                 .unwrap_or(false);
 
         // Recurse into children if within depth limit and this is a meta repo

@@ -79,25 +79,22 @@ pub enum ValidatorConfig {
 
     /// Check if any command arguments match values in a list
     #[serde(rename = "args_match_any")]
-    ArgsMatchAny { command: String, values: Vec<String> },
+    ArgsMatchAny {
+        command: String,
+        values: Vec<String>,
+    },
 
     /// All sub-validators must pass
     #[serde(rename = "all_of")]
-    AllOf {
-        validators: Vec<ValidatorConfig>,
-    },
+    AllOf { validators: Vec<ValidatorConfig> },
 
     /// At least one sub-validator must pass
     #[serde(rename = "any_of")]
-    AnyOf {
-        validators: Vec<ValidatorConfig>,
-    },
+    AnyOf { validators: Vec<ValidatorConfig> },
 
     /// Negate the result of a sub-validator
     #[serde(rename = "not")]
-    Not {
-        validator: Box<ValidatorConfig>,
-    },
+    Not { validator: Box<ValidatorConfig> },
 }
 
 /// Compiled pattern ready for evaluation.
@@ -233,8 +230,7 @@ impl GuardConfig {
 
     /// Load config from embedded default string.
     fn load_from_embedded() -> Self {
-        toml::from_str(DEFAULT_CONFIG)
-            .expect("BUG: embedded default config is invalid TOML")
+        toml::from_str(DEFAULT_CONFIG).expect("BUG: embedded default config is invalid TOML")
     }
 
     /// Load config from a specific file path.
@@ -508,10 +504,7 @@ mod tests {
     fn parse_command_returns_none_for_missing_fields() {
         assert_eq!(parse_command(r#"{}"#), None);
         assert_eq!(parse_command(r#"{"tool_input": {}}"#), None);
-        assert_eq!(
-            parse_command(r#"{"tool_input": {"command": ""}}"#),
-            None
-        );
+        assert_eq!(parse_command(r#"{"tool_input": {"command": ""}}"#), None);
     }
 
     // ── split_compound_command ─────────────────────────
@@ -531,18 +524,12 @@ mod tests {
 
     #[test]
     fn split_or_chain() {
-        assert_eq!(
-            split_compound_command("cmd1 || cmd2"),
-            vec!["cmd1", "cmd2"]
-        );
+        assert_eq!(split_compound_command("cmd1 || cmd2"), vec!["cmd1", "cmd2"]);
     }
 
     #[test]
     fn split_semicolon() {
-        assert_eq!(
-            split_compound_command("cmd1; cmd2"),
-            vec!["cmd1", "cmd2"]
-        );
+        assert_eq!(split_compound_command("cmd1; cmd2"), vec!["cmd1", "cmd2"]);
     }
 
     #[test]
@@ -786,14 +773,8 @@ mod tests {
         };
         let json = serde_json::to_string(&output).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            v["hookSpecificOutput"]["hookEventName"],
-            "PreToolUse"
-        );
-        assert_eq!(
-            v["hookSpecificOutput"]["permissionDecision"],
-            "deny"
-        );
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
         assert_eq!(
             v["hookSpecificOutput"]["permissionDecisionReason"],
             "test reason"
@@ -823,10 +804,7 @@ mod tests {
     #[test]
     fn split_pipe_does_not_confuse_or() {
         // " || " should be matched as OR, not as two pipes
-        assert_eq!(
-            split_compound_command("cmd1 || cmd2"),
-            vec!["cmd1", "cmd2"]
-        );
+        assert_eq!(split_compound_command("cmd1 || cmd2"), vec!["cmd1", "cmd2"]);
     }
 
     // ── git clean separate flags ─────────────────────
@@ -904,10 +882,7 @@ mod tests {
 
     #[test]
     fn parse_command_handles_null_command() {
-        assert_eq!(
-            parse_command(r#"{"tool_input": {"command": null}}"#),
-            None
-        );
+        assert_eq!(parse_command(r#"{"tool_input": {"command": null}}"#), None);
     }
 
     #[test]
@@ -1046,10 +1021,7 @@ mod tests {
     #[test]
     fn split_does_not_break_or_without_spaces() {
         // "cmd1||cmd2" should still be treated as OR (not two pipes)
-        assert_eq!(
-            split_compound_command("cmd1||cmd2"),
-            vec!["cmd1", "cmd2"]
-        );
+        assert_eq!(split_compound_command("cmd1||cmd2"), vec!["cmd1", "cmd2"]);
     }
 
     #[test]
@@ -1071,7 +1043,9 @@ mod tests {
 
     #[test]
     fn all_new_patterns_in_one_chain() {
-        assert!(evaluate_command("git branch -D feat1 && git stash drop && git reset --hard").is_some());
+        assert!(
+            evaluate_command("git branch -D feat1 && git stash drop && git reset --hard").is_some()
+        );
     }
 
     // ── Configuration loading tests ────────────────────
@@ -1097,11 +1071,18 @@ mod tests {
 
         // All default patterns should be enabled
         for pattern in &config.patterns {
-            assert!(pattern.enabled, "Pattern {} should be enabled by default", pattern.id);
+            assert!(
+                pattern.enabled,
+                "Pattern {} should be enabled by default",
+                pattern.id
+            );
         }
 
         // Verify we have the expected number of patterns
-        assert!(config.patterns.len() >= 8, "Should have at least 8 default patterns");
+        assert!(
+            config.patterns.len() >= 8,
+            "Should have at least 8 default patterns"
+        );
     }
 
     #[test]
