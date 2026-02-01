@@ -11,18 +11,18 @@ use std::fs;
 use std::path::Path;
 
 /// Embedded skill files from the meta repository
-const SKILL_META_WORKSPACE: &str = include_str!("../../.claude/skills/meta-workspace.md");
-const SKILL_META_GIT: &str = include_str!("../../.claude/skills/meta-git.md");
-const SKILL_META_EXEC: &str = include_str!("../../.claude/skills/meta-exec.md");
-const SKILL_META_PLUGINS: &str = include_str!("../../.claude/skills/meta-plugins.md");
-const SKILL_META_WORKTREE: &str = include_str!("../../.claude/skills/meta-worktree.md");
-const SKILL_META_SAFETY: &str = include_str!("../../.claude/skills/meta-safety.md");
+const SKILL_META_WORKSPACE: &str = include_str!("../.claude/skills/meta-workspace.md");
+const SKILL_META_GIT: &str = include_str!("../.claude/skills/meta-git.md");
+const SKILL_META_EXEC: &str = include_str!("../.claude/skills/meta-exec.md");
+const SKILL_META_PLUGINS: &str = include_str!("../.claude/skills/meta-plugins.md");
+const SKILL_META_WORKTREE: &str = include_str!("../.claude/skills/meta-worktree.md");
+const SKILL_META_SAFETY: &str = include_str!("../.claude/skills/meta-safety.md");
 
 /// Embedded rule files (always-loaded, survive compaction)
 const RULE_WORKSPACE_DISCIPLINE: &str =
-    include_str!("../../.claude/rules/meta-workspace-discipline.md");
+    include_str!("../.claude/rules/meta-workspace-discipline.md");
 const RULE_DESTRUCTIVE_COMMANDS: &str =
-    include_str!("../../.claude/rules/meta-destructive-commands.md");
+    include_str!("../.claude/rules/meta-destructive-commands.md");
 
 /// All available skills with their filenames
 const SKILLS: &[(&str, &str)] = &[

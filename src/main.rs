@@ -14,7 +14,7 @@ use subprocess_plugins::{PluginRequestOptions, SubprocessPluginManager};
 
 // === CLI Structs ===
 
-const VERSION: &str = include_str!("../../VERSION");
+const VERSION: &str = include_str!("../VERSION");
 
 #[derive(Parser)]
 #[command(author, version = VERSION.trim(), about, long_about = None, disable_help_flag = true)]
