@@ -14,8 +14,10 @@ use subprocess_plugins::{PluginRequestOptions, SubprocessPluginManager};
 
 // === CLI Structs ===
 
+const VERSION: &str = include_str!("../../VERSION");
+
 #[derive(Parser)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version = VERSION.trim(), about, long_about = None)]
 struct Cli {
     #[arg(
         long,
