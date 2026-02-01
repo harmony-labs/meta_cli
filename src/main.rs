@@ -297,7 +297,14 @@ fn write_help_with_plugin_commands(
             .as_ref()
             .map(|p| format!(" [{}]", p))
             .unwrap_or_default();
-        writeln!(w, "  {:<width$}  {}{}", name, desc, suffix, width = max_name_len)?;
+        writeln!(
+            w,
+            "  {:<width$}  {}{}",
+            name,
+            desc,
+            suffix,
+            width = max_name_len
+        )?;
     }
     writeln!(w)?;
 
@@ -353,7 +360,10 @@ fn write_help_with_plugin_commands(
 }
 
 /// Write list of installed plugins to a writer.
-fn write_installed_plugins(plugins: &SubprocessPluginManager, w: &mut dyn Write) -> std::io::Result<()> {
+fn write_installed_plugins(
+    plugins: &SubprocessPluginManager,
+    w: &mut dyn Write,
+) -> std::io::Result<()> {
     let plugin_list = plugins.list_plugins();
     if !plugin_list.is_empty() {
         writeln!(w)?;

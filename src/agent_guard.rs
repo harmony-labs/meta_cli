@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 // ── Configuration ───────────────────────────────────────
 
 /// Default agent guard configuration embedded in the binary.
-const DEFAULT_CONFIG: &str = include_str!("../../.claude/agent-guard.toml");
+const DEFAULT_CONFIG: &str = include_str!("../.claude/agent-guard.toml");
 
 /// Cached compiled patterns loaded once per process.
 /// This avoids repeated file I/O, TOML parsing, and regex compilation.
