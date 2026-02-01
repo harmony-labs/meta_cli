@@ -358,13 +358,13 @@ fn handle_command_dispatch(
     let recursive = cli.recursive;
     let dry_run = cli.dry_run;
     let depth = cli.depth;
-    // Determine parallel mode: --parallel wins, then --sequential, then config default
+    // Determine parallel mode: --parallel wins, then --sequential, then config default (true)
     let parallel = if cli.parallel {
         true
     } else if cli.sequential {
         false
     } else {
-        // Load default from .meta config
+        // Load default from .meta config (defaults to parallel: true if not specified)
         let defaults = config::load_meta_defaults(&std::env::current_dir().unwrap_or_default());
         defaults.parallel
     };
