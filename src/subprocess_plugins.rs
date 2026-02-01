@@ -486,6 +486,43 @@ impl SubprocessPluginManager {
         plugins
     }
 
+    /// Returns all top-level (promoted) commands from plugins.
+    ///
+    /// A "promoted" command is one that doesn't start with the plugin's name,
+    /// making it available directly at the top level (e.g., `meta worktree`
+    /// instead of only `meta git worktree`).
+    ///
+    /// Returns Vec<(command_name, description, plugin_name)>
+    pub fn get_promoted_commands(&self) -> Vec<(String, String, String)> {
+        let mut promoted = Vec::new();
+
+        for plugin in self.plugins.values() {
+            let plugin_name = &plugin.info.name;
+            let descriptions = plugin
+                .info
+                .help
+                .as_ref()
+                .map(|h| &h.commands)
+                .cloned()
+                .unwrap_or_default();
+
+            for cmd in &plugin.info.commands {
+                let first_word = cmd.split_whitespace().next().unwrap_or("");
+                // Promoted if first word is NOT the plugin name AND is a root command (no spaces)
+                if first_word != plugin_name && !cmd.contains(' ') {
+                    let desc = descriptions
+                        .get(cmd)
+                        .cloned()
+                        .unwrap_or_else(|| format!("Provided by {} plugin", plugin_name));
+                    promoted.push((cmd.clone(), desc, plugin_name.clone()));
+                }
+            }
+        }
+
+        promoted.sort_by(|a, b| a.0.cmp(&b.0));
+        promoted
+    }
+
     /// Get help text for a specific plugin
     pub fn get_plugin_help(&self, plugin_name: &str) -> Option<String> {
         let plugin = self.plugins.get(plugin_name)?;

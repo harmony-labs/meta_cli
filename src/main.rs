@@ -17,8 +17,12 @@ use subprocess_plugins::{PluginRequestOptions, SubprocessPluginManager};
 const VERSION: &str = include_str!("../../VERSION");
 
 #[derive(Parser)]
-#[command(author, version = VERSION.trim(), about, long_about = None)]
+#[command(author, version = VERSION.trim(), about, long_about = None, disable_help_flag = true)]
 struct Cli {
+    /// Print help
+    #[arg(short = 'h', long, global = true, action = clap::ArgAction::SetTrue)]
+    help: bool,
+
     #[arg(
         long,
         global = true,
@@ -226,40 +230,141 @@ enum PluginCommands {
 
 // === Help Utilities ===
 
-/// Print help text and installed plugins to stdout or stderr.
+/// Print help text with integrated plugin commands to stdout or stderr.
 /// Use `to_stderr: true` for error cases where help is shown due to an invalid command.
 fn print_help_with_plugins(plugins: &SubprocessPluginManager, to_stderr: bool) {
-    if to_stderr {
-        let _ = Cli::command().write_help(&mut std::io::stderr());
-        eprint_installed_plugins(plugins);
+    let mut output: Box<dyn Write> = if to_stderr {
+        Box::new(std::io::stderr())
     } else {
-        let _ = Cli::command().print_help();
-        print_installed_plugins(plugins);
+        Box::new(std::io::stdout())
+    };
+    let _ = write_help_with_plugin_commands(plugins, &mut output);
+}
+
+/// Write help text with plugin commands integrated into the command list.
+fn write_help_with_plugin_commands(
+    plugins: &SubprocessPluginManager,
+    w: &mut dyn Write,
+) -> std::io::Result<()> {
+    let cmd = Cli::command();
+
+    // Header
+    if let Some(about) = cmd.get_about() {
+        writeln!(w, "{}", about)?;
     }
+    writeln!(w)?;
+
+    // Usage
+    writeln!(w, "Usage: meta [OPTIONS] [COMMAND]")?;
+    writeln!(w)?;
+
+    // Collect all commands: (name, description, plugin_source)
+    let mut commands: Vec<(String, String, Option<String>)> = Vec::new();
+
+    // Built-in commands from clap (skip "help" - we'll add it at the end)
+    for subcommand in cmd.get_subcommands() {
+        let name = subcommand.get_name();
+        if name == "help" {
+            continue;
+        }
+        let about = subcommand
+            .get_about()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        commands.push((name.to_string(), about, None));
+    }
+
+    // Promoted plugin commands (top-level commands from plugins)
+    for (name, desc, plugin) in plugins.get_promoted_commands() {
+        commands.push((name, desc, Some(plugin)));
+    }
+
+    // Sort alphabetically
+    commands.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Add help at the end (standard convention)
+    commands.push((
+        "help".to_string(),
+        "Print this message or the help of the given subcommand(s)".to_string(),
+        None,
+    ));
+
+    // Render commands section
+    writeln!(w, "Commands:")?;
+    let max_name_len = commands.iter().map(|c| c.0.len()).max().unwrap_or(10);
+    for (name, desc, plugin_opt) in &commands {
+        let suffix = plugin_opt
+            .as_ref()
+            .map(|p| format!(" [{}]", p))
+            .unwrap_or_default();
+        writeln!(w, "  {:<width$}  {}{}", name, desc, suffix, width = max_name_len)?;
+    }
+    writeln!(w)?;
+
+    // Options - extract from clap
+    writeln!(w, "Options:")?;
+    for arg in cmd.get_arguments() {
+        let name = arg.get_id().as_str();
+        // Skip hidden or help/version (clap adds them automatically)
+        if name == "help" || name == "version" {
+            continue;
+        }
+
+        let mut flag_str = String::new();
+        if let Some(short) = arg.get_short() {
+            flag_str.push_str(&format!("-{}", short));
+            if arg.get_long().is_some() {
+                flag_str.push_str(", ");
+            }
+        }
+        if let Some(long) = arg.get_long() {
+            flag_str.push_str(&format!("--{}", long));
+        }
+
+        // Add value name if this arg takes a value (not a flag)
+        // A flag has action SetTrue/SetFalse/Count - check num_args or action
+        let is_flag = matches!(
+            arg.get_action(),
+            clap::ArgAction::SetTrue | clap::ArgAction::SetFalse | clap::ArgAction::Count
+        );
+        if !is_flag {
+            if let Some(value_names) = arg.get_value_names() {
+                if !value_names.is_empty() {
+                    flag_str.push_str(&format!(" <{}>", value_names[0]));
+                }
+            }
+        }
+
+        let help = arg.get_help().map(|s| s.to_string()).unwrap_or_default();
+
+        if !flag_str.is_empty() {
+            writeln!(w, "  {:<38}  {}", flag_str, help)?;
+        }
+    }
+
+    // Standard help/version
+    writeln!(w, "  {:<38}  Print help", "-h, --help")?;
+    writeln!(w, "  {:<38}  Print version", "-V, --version")?;
+
+    // Installed plugins section
+    write_installed_plugins(plugins, w)?;
+
+    Ok(())
 }
 
 /// Write list of installed plugins to a writer.
-fn write_installed_plugins(plugins: &SubprocessPluginManager, w: &mut dyn Write) {
+fn write_installed_plugins(plugins: &SubprocessPluginManager, w: &mut dyn Write) -> std::io::Result<()> {
     let plugin_list = plugins.list_plugins();
     if !plugin_list.is_empty() {
-        let _ = writeln!(w);
-        let _ = writeln!(w, "INSTALLED PLUGINS:");
+        writeln!(w)?;
+        writeln!(w, "INSTALLED PLUGINS:")?;
         for (name, version, description) in plugin_list {
-            let _ = writeln!(w, "    {name:<12} v{version:<8} {description}");
+            writeln!(w, "    {name:<12} v{version:<8} {description}")?;
         }
-        let _ = writeln!(w);
-        let _ = writeln!(w, "Run 'meta <plugin> --help' for plugin-specific help.");
+        writeln!(w)?;
+        writeln!(w, "Run 'meta <plugin> --help' for plugin-specific help.")?;
     }
-}
-
-/// Print list of installed plugins for --help output (stdout)
-fn print_installed_plugins(plugins: &SubprocessPluginManager) {
-    write_installed_plugins(plugins, &mut std::io::stdout());
-}
-
-/// Print list of installed plugins to stderr (for error cases)
-fn eprint_installed_plugins(plugins: &SubprocessPluginManager) {
-    write_installed_plugins(plugins, &mut std::io::stderr());
+    Ok(())
 }
 
 // === Main Entry Point ===
@@ -274,6 +379,12 @@ fn main() -> Result<()> {
     // Discover plugins early to handle --help requests and plugin listing
     let mut subprocess_plugins = SubprocessPluginManager::new();
     subprocess_plugins.discover_plugins(cli.verbose)?;
+
+    // Handle --help flag at top level
+    if cli.help && cli.command.is_none() {
+        print_help_with_plugins(&subprocess_plugins, false);
+        std::process::exit(0);
+    }
 
     // Take command out so we can move subcommand args while still borrowing cli
     let command = cli.command.take();
