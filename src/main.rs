@@ -360,12 +360,16 @@ fn handle_command_dispatch(
     let depth = cli.depth;
     // Determine parallel mode: --parallel wins, then --sequential, then config default (true)
     let parallel = if cli.parallel {
+        log::debug!("parallel=true (--parallel flag)");
         true
     } else if cli.sequential {
+        log::debug!("parallel=false (--sequential flag)");
         false
     } else {
         // Load default from .meta config (defaults to parallel: true if not specified)
-        let defaults = config::load_meta_defaults(&std::env::current_dir().unwrap_or_default());
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let defaults = config::load_meta_defaults(&cwd);
+        log::debug!("parallel={} (from config defaults, cwd={})", defaults.parallel, cwd.display());
         defaults.parallel
     };
 
@@ -554,7 +558,7 @@ fn handle_command_dispatch(
                 exclude_filters: exclude_opt,
                 verbose: cli.verbose,
                 silent: cli.silent,
-                parallel: false,
+                parallel, // Use the determined parallel mode, not hardcoded false
                 dry_run,
                 json_output: cli.json,
                 add_aliases_to_global_looprc: false,
