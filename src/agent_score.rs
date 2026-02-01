@@ -528,15 +528,17 @@ fn generate_suggestions(
     }
 
     if discovery_score < 1.0 {
-        if metrics.workspace_discovery_rank.is_none() {
-            suggestions.push(
-                "No workspace discovery detected. Run `meta context` early to understand repo structure.".to_string()
-            );
-        } else {
-            suggestions.push(format!(
-                "Workspace discovery occurred late (call #{}). Run `meta context` in first 3 tool calls.",
-                metrics.workspace_discovery_rank.unwrap()
-            ));
+        match metrics.workspace_discovery_rank {
+            None => {
+                suggestions.push(
+                    "No workspace discovery detected. Run `meta context` early to understand repo structure.".to_string()
+                );
+            }
+            Some(rank) => {
+                suggestions.push(format!(
+                    "Workspace discovery occurred late (call #{rank}). Run `meta context` in first 3 tool calls."
+                ));
+            }
         }
     }
 
