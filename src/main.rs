@@ -839,6 +839,15 @@ fn create_installer(local: bool, verbose: bool) -> Result<registry::PluginInstal
     }
 }
 
+/// Format the plugin location string for user-facing messages
+fn format_plugin_location(local: bool) -> &'static str {
+    if local {
+        ".meta/plugins"
+    } else {
+        "~/.meta/plugins"
+    }
+}
+
 /// Handle plugin management subcommands with typed args.
 fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: bool) -> Result<()> {
     use registry::{PluginInstaller, RegistryClient, PLUGIN_PREFIX};
@@ -880,7 +889,7 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
         PluginCommands::Install { name, local } => {
             use registry::GitHubShorthand;
             let installer = create_installer(local, verbose)?;
-            let location = if local { ".meta/plugins" } else { "~/.meta/plugins" };
+            let location = format_plugin_location(local);
 
             // Detect input type and route accordingly
             if name.starts_with("http://") || name.starts_with("https://") {
@@ -959,7 +968,7 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
         }
         PluginCommands::Uninstall { name, local } => {
             let installer = create_installer(local, verbose)?;
-            let location = if local { ".meta/plugins" } else { "~/.meta/plugins" };
+            let location = format_plugin_location(local);
             installer.uninstall(&name)?;
 
             if !json {

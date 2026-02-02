@@ -87,6 +87,16 @@ pub enum PluginLocation {
     ProjectLocal,
 }
 
+/// Plugin installation scope (for installer configuration)
+#[derive(Debug, Clone, PartialEq)]
+pub enum InstallScope {
+    /// Global installation to ~/.meta/plugins/
+    Global,
+    /// Project-local installation to .meta/plugins/
+    Local,
+    // Future: Custom(PathBuf) for --path flag in M5
+}
+
 impl PluginManifest {
     /// Load manifest from file, or return empty manifest if not found
     pub fn load(manifest_path: &Path) -> Result<Self> {
@@ -461,9 +471,11 @@ fn make_executable(_path: &Path) -> Result<()> {
 }
 
 /// Plugin installer
+#[derive(Debug)]
 pub struct PluginInstaller {
     plugins_dir: PathBuf,
     verbose: bool,
+    scope: InstallScope,
 }
 
 impl PluginInstaller {
@@ -473,6 +485,7 @@ impl PluginInstaller {
         Ok(Self {
             plugins_dir,
             verbose,
+            scope: InstallScope::Global,
         })
     }
 
@@ -483,7 +496,13 @@ impl PluginInstaller {
         Ok(Self {
             plugins_dir,
             verbose,
+            scope: InstallScope::Local,
         })
+    }
+
+    /// Get the installation scope of this installer
+    pub fn scope(&self) -> &InstallScope {
+        &self.scope
     }
 
     /// Find the workspace root directory by walking up from the current directory
@@ -1115,6 +1134,7 @@ mod tests {
         let installer = PluginInstaller {
             plugins_dir: dir.path().to_path_buf(),
             verbose: false,
+            scope: InstallScope::Global,
         };
 
         let plugins = installer.list_installed().unwrap();
@@ -1134,6 +1154,7 @@ mod tests {
         let installer = PluginInstaller {
             plugins_dir: dir.path().to_path_buf(),
             verbose: false,
+            scope: InstallScope::Global,
         };
 
         let plugins = installer.list_installed().unwrap();
@@ -1153,6 +1174,7 @@ mod tests {
         let installer = PluginInstaller {
             plugins_dir: dir.path().to_path_buf(),
             verbose: false,
+            scope: InstallScope::Global,
         };
 
         // Uninstall should succeed
@@ -1167,6 +1189,7 @@ mod tests {
         let installer = PluginInstaller {
             plugins_dir: dir.path().to_path_buf(),
             verbose: false,
+            scope: InstallScope::Global,
         };
 
         // Uninstall should fail for non-existent plugin
@@ -1214,6 +1237,7 @@ mod tests {
         let installer = PluginInstaller {
             plugins_dir: dir.path().to_path_buf(),
             verbose: false,
+            scope: InstallScope::Global,
         };
 
         // Create a minimal tar.gz with a meta-test file
@@ -1250,6 +1274,7 @@ mod tests {
         let installer = PluginInstaller {
             plugins_dir: dir.path().to_path_buf(),
             verbose: false,
+            scope: InstallScope::Global,
         };
 
         // Create a tar.gz with both meta-* and non-meta files
@@ -1289,6 +1314,7 @@ mod tests {
         let installer = PluginInstaller {
             plugins_dir: dir.path().to_path_buf(),
             verbose: false,
+            scope: InstallScope::Global,
         };
 
         // Create a minimal zip with a meta-test file
@@ -1317,6 +1343,7 @@ mod tests {
         let installer = PluginInstaller {
             plugins_dir: dir.path().to_path_buf(),
             verbose: false,
+            scope: InstallScope::Global,
         };
 
         // Create a zip with both meta-* and non-meta files
@@ -1348,6 +1375,7 @@ mod tests {
         let installer = PluginInstaller {
             plugins_dir: dir.path().to_path_buf(),
             verbose: false,
+            scope: InstallScope::Global,
         };
 
         let result = installer.extract_archive("https://example.com/plugin.exe", &[]);
@@ -1425,6 +1453,7 @@ mod tests {
         let installer = PluginInstaller {
             plugins_dir: dir.path().to_path_buf(),
             verbose: false,
+            scope: InstallScope::Global,
         };
 
         let shorthand = GitHubShorthand::parse("user/meta-docker@v1.0.0").unwrap();
@@ -1452,6 +1481,7 @@ mod tests {
         let installer = PluginInstaller {
             plugins_dir: dir.path().to_path_buf(),
             verbose: false,
+            scope: InstallScope::Global,
         };
 
         let shorthand = GitHubShorthand::parse("user/meta-docker").unwrap();
@@ -1468,6 +1498,7 @@ mod tests {
         let installer = PluginInstaller {
             plugins_dir: dir.path().to_path_buf(),
             verbose: false,
+            scope: InstallScope::Global,
         };
 
         // When repo doesn't have "meta-" prefix, both names would be the same
@@ -1581,6 +1612,7 @@ mod tests {
         let installer = PluginInstaller {
             plugins_dir: dir.path().to_path_buf(),
             verbose: false,
+            scope: InstallScope::Global,
         };
 
         // Create a fake invalid plugin (not executable/doesn't respond to --meta-plugin-info)
@@ -1685,6 +1717,7 @@ mod tests {
         let installer = PluginInstaller {
             plugins_dir: dir.path().to_path_buf(),
             verbose: false,
+            scope: InstallScope::Global,
         };
 
         let plugins = installer.list_plugins_detailed().unwrap();
@@ -1697,6 +1730,7 @@ mod tests {
         let installer = PluginInstaller {
             plugins_dir: dir.path().to_path_buf(),
             verbose: false,
+            scope: InstallScope::Global,
         };
 
         // Create plugin file
@@ -1747,7 +1781,11 @@ mod tests {
         std::env::set_current_dir(&original_dir).unwrap();
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), temp.path());
+        // Canonicalize paths for comparison (handles /var vs /private/var on macOS)
+        assert_eq!(
+            result.unwrap().canonicalize().unwrap(),
+            temp.path().canonicalize().unwrap()
+        );
     }
 
     #[test]
@@ -1763,7 +1801,11 @@ mod tests {
         std::env::set_current_dir(&original_dir).unwrap();
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), temp.path());
+        // Canonicalize paths for comparison (handles /var vs /private/var on macOS)
+        assert_eq!(
+            result.unwrap().canonicalize().unwrap(),
+            temp.path().canonicalize().unwrap()
+        );
     }
 
     #[test]
@@ -1779,7 +1821,11 @@ mod tests {
         std::env::set_current_dir(&original_dir).unwrap();
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), temp.path());
+        // Canonicalize paths for comparison (handles /var vs /private/var on macOS)
+        assert_eq!(
+            result.unwrap().canonicalize().unwrap(),
+            temp.path().canonicalize().unwrap()
+        );
     }
 
     #[test]
@@ -1817,7 +1863,11 @@ mod tests {
 
         // Should successfully find the workspace root
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), temp.path());
+        // Canonicalize paths for comparison (handles /var vs /private/var on macOS)
+        assert_eq!(
+            result.unwrap().canonicalize().unwrap(),
+            temp.path().canonicalize().unwrap()
+        );
     }
 
     #[test]
@@ -1825,6 +1875,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let meta_dir = temp.path().join(".meta");
         std::fs::create_dir(&meta_dir).unwrap();
+
+        // Create plugins dir so we can canonicalize it
+        let plugins_dir = temp.path().join(LOCAL_PLUGINS_DIR);
+        std::fs::create_dir_all(&plugins_dir).unwrap();
 
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(temp.path()).unwrap();
@@ -1835,7 +1889,12 @@ mod tests {
 
         assert!(result.is_ok());
         let installer = result.unwrap();
-        assert_eq!(installer.plugins_dir, temp.path().join(LOCAL_PLUGINS_DIR));
+        // Canonicalize paths for comparison (handles /var vs /private/var on macOS)
+        assert_eq!(
+            installer.plugins_dir.canonicalize().unwrap(),
+            plugins_dir.canonicalize().unwrap()
+        );
+        assert_eq!(installer.scope, InstallScope::Local);
     }
 
     #[test]
