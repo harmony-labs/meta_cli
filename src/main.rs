@@ -218,13 +218,23 @@ enum PluginCommands {
     Install {
         /// Plugin name
         name: String,
+        /// Install plugin locally to project (.meta/plugins/) instead of globally
+        #[arg(long)]
+        local: bool,
     },
     /// List installed plugins
-    List,
+    List {
+        /// List only project-local plugins
+        #[arg(long)]
+        local: bool,
+    },
     /// Uninstall a plugin
     Uninstall {
         /// Plugin name
         name: String,
+        /// Uninstall from project-local plugins
+        #[arg(long)]
+        local: bool,
     },
 }
 
@@ -830,10 +840,10 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
             println!("Usage: meta plugin <command>");
             println!();
             println!("Commands:");
-            println!("  search <query>   Search for plugins in the registry");
-            println!("  install <name>   Install a plugin from the registry");
-            println!("  list             List installed plugins");
-            println!("  uninstall <name> Uninstall a plugin");
+            println!("  search <query>        Search for plugins in the registry");
+            println!("  install <name>        Install a plugin (add --local for project-local)");
+            println!("  list                  List installed plugins (add --local for project-local only)");
+            println!("  uninstall <name>      Uninstall a plugin (add --local for project-local)");
             return Ok(());
         }
     };
@@ -858,22 +868,28 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
                 }
             }
         }
-        PluginCommands::Install { name } => {
+        PluginCommands::Install { name, local } => {
             use registry::GitHubShorthand;
-            let installer = PluginInstaller::new(verbose)?;
+            let installer = if local {
+                PluginInstaller::new_local(verbose)?
+            } else {
+                PluginInstaller::new(verbose)?
+            };
+
+            let location = if local { ".meta/plugins" } else { "~/.meta/plugins" };
 
             // Detect input type and route accordingly
             if name.starts_with("http://") || name.starts_with("https://") {
                 // Direct URL install
                 let plugin_name = installer.install_from_url(&name)?;
                 if !json {
-                    println!("Successfully installed {plugin_name}");
+                    println!("Successfully installed {plugin_name} to {location}");
                 }
             } else if let Some(shorthand) = GitHubShorthand::parse(&name) {
                 // GitHub shorthand install (user/repo[@version])
                 let plugin_name = installer.install_from_github(&shorthand)?;
                 if !json {
-                    println!("Successfully installed {plugin_name}");
+                    println!("Successfully installed {plugin_name} to {location}");
                 }
             } else {
                 // Registry-based install
@@ -883,22 +899,44 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
 
                 if !json {
                     println!(
-                        "Successfully installed {} v{} ({})",
+                        "Successfully installed {} v{} ({}) to {location}",
                         metadata.name, metadata.version, installed.join(", ")
                     );
                 }
             }
         }
-        PluginCommands::List => {
-            let installer = PluginInstaller::new(verbose)?;
-            let plugins = installer.list_plugins_detailed()?;
+        PluginCommands::List { local } => {
+            let plugins = if local {
+                // List only project-local plugins
+                match PluginInstaller::new_local(verbose) {
+                    Ok(installer) => installer.list_plugins_detailed()?,
+                    Err(_) => {
+                        if !json {
+                            println!("Not in a meta workspace");
+                        }
+                        return Ok(());
+                    }
+                }
+            } else {
+                // List all plugins (global + local via discovery)
+                let installer = PluginInstaller::new(verbose)?;
+                installer.list_plugins_detailed()?
+            };
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&plugins)?);
             } else if plugins.is_empty() {
-                println!("No plugins installed");
+                if local {
+                    println!("No project-local plugins installed");
+                } else {
+                    println!("No plugins installed");
+                }
             } else {
-                println!("Installed plugins ({}):", plugins.len());
+                if local {
+                    println!("Project-local plugins ({}):", plugins.len());
+                } else {
+                    println!("Installed plugins ({}):", plugins.len());
+                }
                 println!();
                 println!("{:<20} {:<15} {:<30} {:<15}", "NAME", "VERSION", "SOURCE", "LOCATION");
                 println!("{}", "-".repeat(80));
@@ -915,12 +953,18 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
                 }
             }
         }
-        PluginCommands::Uninstall { name } => {
-            let installer = PluginInstaller::new(verbose)?;
+        PluginCommands::Uninstall { name, local } => {
+            let installer = if local {
+                PluginInstaller::new_local(verbose)?
+            } else {
+                PluginInstaller::new(verbose)?
+            };
+
+            let location = if local { ".meta/plugins" } else { "~/.meta/plugins" };
             installer.uninstall(&name)?;
 
             if !json {
-                println!("Successfully uninstalled {name}");
+                println!("Successfully uninstalled {name} from {location}");
             }
         }
     }

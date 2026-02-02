@@ -461,13 +461,52 @@ pub struct PluginInstaller {
 }
 
 impl PluginInstaller {
-    /// Create a new plugin installer
+    /// Create a new plugin installer for global plugins
     pub fn new(verbose: bool) -> Result<Self> {
         let plugins_dir = Self::default_plugins_dir()?;
         Ok(Self {
             plugins_dir,
             verbose,
         })
+    }
+
+    /// Create a new plugin installer for project-local plugins
+    pub fn new_local(verbose: bool) -> Result<Self> {
+        let workspace_root = Self::find_workspace_root()?;
+        let plugins_dir = workspace_root.join(".meta").join("plugins");
+        Ok(Self {
+            plugins_dir,
+            verbose,
+        })
+    }
+
+    /// Find the workspace root directory (containing .meta/ or .meta.yaml)
+    fn find_workspace_root() -> Result<PathBuf> {
+        use crate::config::find_meta_config;
+        let cwd = std::env::current_dir().context("Failed to get current directory")?;
+
+        // First check for .meta/config.yaml (new format)
+        let mut current = cwd.as_path();
+        loop {
+            let meta_dir = current.join(".meta");
+            if meta_dir.is_dir() {
+                return Ok(current.to_path_buf());
+            }
+
+            match current.parent() {
+                Some(parent) => current = parent,
+                None => break,
+            }
+        }
+
+        // Fall back to legacy config file detection
+        if let Some((config_path, _)) = find_meta_config(&cwd, None) {
+            if let Some(parent) = config_path.parent() {
+                return Ok(parent.to_path_buf());
+            }
+        }
+
+        anyhow::bail!("Not in a meta workspace (no .meta/ directory or .meta config file found)")
     }
 
     /// Get the default plugins directory (~/.meta/plugins/)
