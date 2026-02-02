@@ -21,6 +21,12 @@ pub const PLUGIN_PREFIX: &str = "meta-";
 /// File extensions to exclude when listing installed plugins
 const EXCLUDED_EXTENSIONS: &[&str] = &[".dylib", ".so", ".dll", ".a"];
 
+/// Local plugins directory path (relative to workspace root)
+const LOCAL_PLUGINS_DIR: &str = ".meta/plugins";
+
+/// Global plugins directory name (under ~/.meta/)
+const GLOBAL_PLUGINS_DIR: &str = "plugins";
+
 /// Ensure a plugin name has the required prefix
 pub fn ensure_plugin_prefix(name: &str) -> String {
     if name.starts_with(PLUGIN_PREFIX) {
@@ -473,45 +479,58 @@ impl PluginInstaller {
     /// Create a new plugin installer for project-local plugins
     pub fn new_local(verbose: bool) -> Result<Self> {
         let workspace_root = Self::find_workspace_root()?;
-        let plugins_dir = workspace_root.join(".meta").join("plugins");
+        let plugins_dir = workspace_root.join(LOCAL_PLUGINS_DIR);
         Ok(Self {
             plugins_dir,
             verbose,
         })
     }
 
-    /// Find the workspace root directory (containing .meta/ or .meta.yaml)
+    /// Find the workspace root directory by walking up from the current directory
+    ///
+    /// Searches for:
+    /// 1. `.meta/` directory (new format, preferred)
+    /// 2. `.meta.yaml`, `.meta.yml`, or `.meta` config file (legacy formats)
+    ///
+    /// Walks up the directory tree until one is found or filesystem root is reached.
+    ///
+    /// # Errors
+    /// Returns error if not in a meta workspace with actionable guidance.
     fn find_workspace_root() -> Result<PathBuf> {
-        use crate::config::find_meta_config;
+        use crate::config::find_meta_config_in;
         let cwd = std::env::current_dir().context("Failed to get current directory")?;
 
-        // First check for .meta/config.yaml (new format)
+        // Walk up the directory tree once, checking both .meta/ and config files
         let mut current = cwd.as_path();
         loop {
+            // Check for .meta/ directory (new format)
             let meta_dir = current.join(".meta");
             if meta_dir.is_dir() {
                 return Ok(current.to_path_buf());
             }
 
+            // Check for legacy config files in current directory
+            if let Some((_config_path, _)) = find_meta_config_in(current) {
+                return Ok(current.to_path_buf());
+            }
+
+            // Move to parent directory
             match current.parent() {
                 Some(parent) => current = parent,
                 None => break,
             }
         }
 
-        // Fall back to legacy config file detection
-        if let Some((config_path, _)) = find_meta_config(&cwd, None) {
-            if let Some(parent) = config_path.parent() {
-                return Ok(parent.to_path_buf());
-            }
-        }
-
-        anyhow::bail!("Not in a meta workspace (no .meta/ directory or .meta config file found)")
+        anyhow::bail!(
+            "Not in a meta workspace.\n\
+             Expected to find .meta/ directory or .meta.yaml config file.\n\
+             Run 'meta init' to create a new workspace, or cd to an existing workspace."
+        )
     }
 
     /// Get the default plugins directory (~/.meta/plugins/)
     fn default_plugins_dir() -> Result<PathBuf> {
-        meta_core::data_dir::data_subdir("plugins")
+        meta_core::data_dir::data_subdir(GLOBAL_PLUGINS_DIR)
     }
 
     /// Ensure the plugins directory exists
@@ -1703,5 +1722,141 @@ mod tests {
         assert_eq!(plugins[0].name, "meta-test");
         assert_eq!(plugins[0].version.as_deref(), Some("v1.0.0"));
         assert_eq!(plugins[0].source.as_deref(), Some("test-user/meta-test"));
+    }
+
+    // === M4: Project-local plugin installation tests ===
+
+    #[test]
+    fn test_find_workspace_root_with_meta_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let meta_dir = temp.path().join(".meta");
+        std::fs::create_dir(&meta_dir).unwrap();
+
+        // Change to subdirectory to test walking up
+        let subdir = temp.path().join("sub").join("dir");
+        std::fs::create_dir_all(&subdir).unwrap();
+
+        // Save original directory
+        let original_dir = std::env::current_dir().unwrap();
+
+        // Change to subdirectory and test
+        std::env::set_current_dir(&subdir).unwrap();
+        let result = PluginInstaller::find_workspace_root();
+
+        // Restore original directory
+        std::env::set_current_dir(&original_dir).unwrap();
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), temp.path());
+    }
+
+    #[test]
+    fn test_find_workspace_root_with_legacy_yaml() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".meta.yaml"), "projects: {}").unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        let result = PluginInstaller::find_workspace_root();
+
+        std::env::set_current_dir(&original_dir).unwrap();
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), temp.path());
+    }
+
+    #[test]
+    fn test_find_workspace_root_with_legacy_json() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".meta"), r#"{"projects":{}}"#).unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        let result = PluginInstaller::find_workspace_root();
+
+        std::env::set_current_dir(&original_dir).unwrap();
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), temp.path());
+    }
+
+    #[test]
+    fn test_find_workspace_root_fails_outside_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        let result = PluginInstaller::find_workspace_root();
+
+        std::env::set_current_dir(&original_dir).unwrap();
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Not in a meta workspace"));
+        assert!(err_msg.contains("meta init"));
+    }
+
+    #[test]
+    fn test_find_workspace_root_prefers_meta_dir_over_legacy() {
+        let temp = tempfile::tempdir().unwrap();
+
+        // Create both .meta/ directory and legacy .meta.yaml
+        let meta_dir = temp.path().join(".meta");
+        std::fs::create_dir(&meta_dir).unwrap();
+        std::fs::write(temp.path().join(".meta.yaml"), "projects: {}").unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        let result = PluginInstaller::find_workspace_root();
+
+        std::env::set_current_dir(&original_dir).unwrap();
+
+        // Should successfully find the workspace root
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), temp.path());
+    }
+
+    #[test]
+    fn test_new_local_creates_installer_with_correct_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let meta_dir = temp.path().join(".meta");
+        std::fs::create_dir(&meta_dir).unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        let result = PluginInstaller::new_local(false);
+
+        std::env::set_current_dir(&original_dir).unwrap();
+
+        assert!(result.is_ok());
+        let installer = result.unwrap();
+        assert_eq!(installer.plugins_dir, temp.path().join(LOCAL_PLUGINS_DIR));
+    }
+
+    #[test]
+    fn test_new_local_fails_outside_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        let result = PluginInstaller::new_local(false);
+
+        std::env::set_current_dir(&original_dir).unwrap();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Not in a meta workspace"));
+    }
+
+    #[test]
+    fn test_constants_defined() {
+        // Verify constants are accessible and have expected values
+        assert_eq!(LOCAL_PLUGINS_DIR, ".meta/plugins");
+        assert_eq!(GLOBAL_PLUGINS_DIR, "plugins");
     }
 }

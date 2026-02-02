@@ -830,6 +830,15 @@ fn handle_command_dispatch(
 
 // === Plugin Management ===
 
+/// Create a plugin installer for the specified scope (local or global)
+fn create_installer(local: bool, verbose: bool) -> Result<registry::PluginInstaller> {
+    if local {
+        registry::PluginInstaller::new_local(verbose)
+    } else {
+        registry::PluginInstaller::new(verbose)
+    }
+}
+
 /// Handle plugin management subcommands with typed args.
 fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: bool) -> Result<()> {
     use registry::{PluginInstaller, RegistryClient, PLUGIN_PREFIX};
@@ -870,12 +879,7 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
         }
         PluginCommands::Install { name, local } => {
             use registry::GitHubShorthand;
-            let installer = if local {
-                PluginInstaller::new_local(verbose)?
-            } else {
-                PluginInstaller::new(verbose)?
-            };
-
+            let installer = create_installer(local, verbose)?;
             let location = if local { ".meta/plugins" } else { "~/.meta/plugins" };
 
             // Detect input type and route accordingly
@@ -954,12 +958,7 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
             }
         }
         PluginCommands::Uninstall { name, local } => {
-            let installer = if local {
-                PluginInstaller::new_local(verbose)?
-            } else {
-                PluginInstaller::new(verbose)?
-            };
-
+            let installer = create_installer(local, verbose)?;
             let location = if local { ".meta/plugins" } else { "~/.meta/plugins" };
             installer.uninstall(&name)?;
 
