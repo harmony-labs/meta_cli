@@ -220,6 +220,41 @@ impl RegistryClient {
     }
 }
 
+/// Supported archive formats for plugin distribution
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ArchiveFormat {
+    TarGz,
+    Zip,
+}
+
+impl ArchiveFormat {
+    /// Detect archive format from URL or filename
+    pub fn from_url(url: &str) -> Option<Self> {
+        if url.ends_with(".tar.gz") || url.ends_with(".tgz") {
+            Some(Self::TarGz)
+        } else if url.ends_with(".zip") {
+            Some(Self::Zip)
+        } else {
+            None
+        }
+    }
+}
+
+/// Make a file executable on Unix systems (chmod 755)
+#[cfg(unix)]
+fn make_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(path)?.permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 /// Plugin installer
 pub struct PluginInstaller {
     plugins_dir: PathBuf,
@@ -241,8 +276,33 @@ impl PluginInstaller {
         meta_core::data_dir::data_subdir("plugins")
     }
 
+    /// Ensure the plugins directory exists
+    fn ensure_plugins_dir(&self) -> Result<()> {
+        std::fs::create_dir_all(&self.plugins_dir).with_context(|| {
+            format!(
+                "Failed to create plugins directory: {}",
+                self.plugins_dir.display()
+            )
+        })
+    }
+
+    /// Download bytes from a URL
+    fn download(&self, url: &str) -> Result<Vec<u8>> {
+        let response = ureq::get(url)
+            .call()
+            .with_context(|| format!("Failed to download {url}"))?;
+
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .read_to_end(&mut bytes)
+            .with_context(|| "Failed to read download")?;
+
+        Ok(bytes)
+    }
+
     /// Install a plugin from the registry
-    pub fn install(&self, metadata: &PluginMetadata) -> Result<()> {
+    pub fn install(&self, metadata: &PluginMetadata) -> Result<Vec<String>> {
         let platform = RegistryClient::current_platform();
 
         // Get the download URL for the current platform and latest version
@@ -263,27 +323,24 @@ impl PluginInstaller {
             println!("URL: {download_url}");
         }
 
-        // Create plugins directory if it doesn't exist
-        std::fs::create_dir_all(&self.plugins_dir).with_context(|| {
-            format!(
-                "Failed to create plugins directory: {}",
-                self.plugins_dir.display()
-            )
-        })?;
+        self.ensure_plugins_dir()?;
+        let bytes = self.download(&download_url)?;
 
-        // Download the archive
-        let response = ureq::get(&download_url)
-            .call()
-            .with_context(|| format!("Failed to download {download_url}"))?;
+        // Extract and validate
+        let installed = self.extract_archive(&download_url, &bytes)?;
 
-        let mut bytes = Vec::new();
-        response
-            .into_reader()
-            .read_to_end(&mut bytes)
-            .with_context(|| "Failed to read download")?;
+        if installed.is_empty() {
+            anyhow::bail!("No meta-* executables found in archive");
+        }
 
-        // Extract the archive
-        self.extract_archive(&bytes, &download_url, &metadata.name)?;
+        // Validate each installed plugin
+        for plugin_name in &installed {
+            let plugin_path = self.plugins_dir.join(plugin_name);
+            self.validate_plugin(&plugin_path).with_context(|| {
+                let _ = std::fs::remove_file(&plugin_path);
+                format!("Plugin validation failed for {plugin_name}")
+            })?;
+        }
 
         if self.verbose {
             println!(
@@ -292,7 +349,7 @@ impl PluginInstaller {
             );
         }
 
-        Ok(())
+        Ok(installed)
     }
 
     /// Install a plugin directly from a URL (bypasses registry)
@@ -304,27 +361,11 @@ impl PluginInstaller {
             println!("Downloading from: {url}");
         }
 
-        // Create plugins directory if it doesn't exist
-        std::fs::create_dir_all(&self.plugins_dir).with_context(|| {
-            format!(
-                "Failed to create plugins directory: {}",
-                self.plugins_dir.display()
-            )
-        })?;
-
-        // Download the archive
-        let response = ureq::get(url)
-            .call()
-            .with_context(|| format!("Failed to download {url}"))?;
-
-        let mut bytes = Vec::new();
-        response
-            .into_reader()
-            .read_to_end(&mut bytes)
-            .with_context(|| "Failed to read download")?;
+        self.ensure_plugins_dir()?;
+        let bytes = self.download(url)?;
 
         // Extract the archive and collect installed plugin names
-        let installed = self.extract_archive_and_collect(url, &bytes)?;
+        let installed = self.extract_archive(url, &bytes)?;
 
         if installed.is_empty() {
             anyhow::bail!("No meta-* executables found in archive");
@@ -349,64 +390,60 @@ impl PluginInstaller {
     }
 
     /// Extract archive and return list of installed plugin names
-    fn extract_archive_and_collect(&self, url: &str, bytes: &[u8]) -> Result<Vec<String>> {
+    fn extract_archive(&self, url: &str, bytes: &[u8]) -> Result<Vec<String>> {
+        let format = ArchiveFormat::from_url(url)
+            .with_context(|| format!("Unsupported archive format: {url}"))?;
+
+        match format {
+            ArchiveFormat::TarGz => self.extract_tar_gz(bytes),
+            ArchiveFormat::Zip => self.extract_zip(bytes),
+        }
+    }
+
+    /// Extract a tar.gz archive
+    fn extract_tar_gz(&self, bytes: &[u8]) -> Result<Vec<String>> {
         let mut installed = Vec::new();
+        let decoder = flate2::read::GzDecoder::new(bytes);
+        let mut archive = tar::Archive::new(decoder);
 
-        if url.ends_with(".tar.gz") || url.ends_with(".tgz") {
-            let decoder = flate2::read::GzDecoder::new(bytes);
-            let mut archive = tar::Archive::new(decoder);
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            let file_name = entry
+                .path()?
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string());
 
-            for entry in archive.entries()? {
-                let mut entry = entry?;
-                let file_name = entry
-                    .path()?
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| s.to_string());
-
-                if let Some(name) = file_name {
-                    if name.starts_with("meta-") {
-                        let dest = self.plugins_dir.join(&name);
-                        entry.unpack(&dest)?;
-
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            let mut perms = std::fs::metadata(&dest)?.permissions();
-                            perms.set_mode(0o755);
-                            std::fs::set_permissions(&dest, perms)?;
-                        }
-
-                        installed.push(name);
-                    }
+            if let Some(name) = file_name {
+                if name.starts_with("meta-") {
+                    let dest = self.plugins_dir.join(&name);
+                    entry.unpack(&dest)?;
+                    make_executable(&dest)?;
+                    installed.push(name);
                 }
             }
-        } else if url.ends_with(".zip") {
-            let cursor = std::io::Cursor::new(bytes);
-            let mut archive = zip::ZipArchive::new(cursor)?;
+        }
 
-            for i in 0..archive.len() {
-                let mut file = archive.by_index(i)?;
-                let file_name = file.name().to_string();
+        Ok(installed)
+    }
 
-                if file_name.starts_with("meta-") {
-                    let dest = self.plugins_dir.join(&file_name);
-                    let mut dest_file = std::fs::File::create(&dest)?;
-                    std::io::copy(&mut file, &mut dest_file)?;
+    /// Extract a zip archive
+    fn extract_zip(&self, bytes: &[u8]) -> Result<Vec<String>> {
+        let mut installed = Vec::new();
+        let cursor = std::io::Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(cursor)?;
 
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let mut perms = std::fs::metadata(&dest)?.permissions();
-                        perms.set_mode(0o755);
-                        std::fs::set_permissions(&dest, perms)?;
-                    }
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i)?;
+            let file_name = file.name().to_string();
 
-                    installed.push(file_name);
-                }
+            if file_name.starts_with("meta-") {
+                let dest = self.plugins_dir.join(&file_name);
+                let mut dest_file = std::fs::File::create(&dest)?;
+                std::io::copy(&mut file, &mut dest_file)?;
+                make_executable(&dest)?;
+                installed.push(file_name);
             }
-        } else {
-            anyhow::bail!("Unsupported archive format: {url}");
         }
 
         Ok(installed)
@@ -446,62 +483,6 @@ impl PluginInstaller {
             "windows-x64" => releases.windows_x64.clone(),
             _ => None,
         }
-    }
-
-    /// Extract an archive to the plugins directory
-    fn extract_archive(&self, bytes: &[u8], url: &str, _plugin_name: &str) -> Result<()> {
-        if url.ends_with(".tar.gz") || url.ends_with(".tgz") {
-            let decoder = flate2::read::GzDecoder::new(bytes);
-            let mut archive = tar::Archive::new(decoder);
-
-            for entry in archive.entries()? {
-                let mut entry = entry?;
-                let path = entry.path()?;
-                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-
-                // Only extract executables (meta-* files)
-                if file_name.starts_with("meta-") {
-                    let dest = self.plugins_dir.join(file_name);
-                    entry.unpack(&dest)?;
-
-                    // Make executable on Unix
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let mut perms = std::fs::metadata(&dest)?.permissions();
-                        perms.set_mode(0o755);
-                        std::fs::set_permissions(&dest, perms)?;
-                    }
-                }
-            }
-        } else if url.ends_with(".zip") {
-            let cursor = std::io::Cursor::new(bytes);
-            let mut archive = zip::ZipArchive::new(cursor)?;
-
-            for i in 0..archive.len() {
-                let mut file = archive.by_index(i)?;
-                let file_name = file.name();
-
-                if file_name.starts_with("meta-") {
-                    let dest = self.plugins_dir.join(file_name);
-                    let mut dest_file = std::fs::File::create(&dest)?;
-                    std::io::copy(&mut file, &mut dest_file)?;
-
-                    // Make executable on Unix
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let mut perms = std::fs::metadata(&dest)?.permissions();
-                        perms.set_mode(0o755);
-                        std::fs::set_permissions(&dest, perms)?;
-                    }
-                }
-            }
-        } else {
-            anyhow::bail!("Unsupported archive format: {url}");
-        }
-
-        Ok(())
     }
 
     /// List installed plugins
@@ -715,5 +696,177 @@ mod tests {
 
         assert_eq!(client.registries.len(), 1);
         assert_eq!(client.registries[0], "https://test.registry.com");
+    }
+
+    #[test]
+    fn test_archive_format_from_url() {
+        assert_eq!(
+            ArchiveFormat::from_url("https://example.com/plugin.tar.gz"),
+            Some(ArchiveFormat::TarGz)
+        );
+        assert_eq!(
+            ArchiveFormat::from_url("https://example.com/plugin.tgz"),
+            Some(ArchiveFormat::TarGz)
+        );
+        assert_eq!(
+            ArchiveFormat::from_url("https://example.com/plugin.zip"),
+            Some(ArchiveFormat::Zip)
+        );
+        assert_eq!(
+            ArchiveFormat::from_url("https://example.com/plugin.exe"),
+            None
+        );
+        assert_eq!(ArchiveFormat::from_url("https://example.com/plugin"), None);
+    }
+
+    #[test]
+    fn test_extract_tar_gz() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let installer = PluginInstaller {
+            plugins_dir: dir.path().to_path_buf(),
+            verbose: false,
+        };
+
+        // Create a minimal tar.gz with a meta-test file
+        let mut builder = tar::Builder::new(Vec::new());
+
+        let content = b"#!/bin/sh\necho test";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("meta-test").unwrap();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder.append(&header, &content[..]).unwrap();
+
+        let tar_data = builder.into_inner().unwrap();
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&tar_data).unwrap();
+        let gz_data = encoder.finish().unwrap();
+
+        let installed = installer.extract_tar_gz(&gz_data).unwrap();
+
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0], "meta-test");
+        assert!(dir.path().join("meta-test").exists());
+    }
+
+    #[test]
+    fn test_extract_tar_gz_filters_non_meta_files() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let installer = PluginInstaller {
+            plugins_dir: dir.path().to_path_buf(),
+            verbose: false,
+        };
+
+        // Create a tar.gz with both meta-* and non-meta files
+        let mut builder = tar::Builder::new(Vec::new());
+
+        for name in &["meta-plugin", "readme.txt", "other-binary"] {
+            let content = b"content";
+            let mut header = tar::Header::new_gnu();
+            header.set_path(name).unwrap();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append(&header, &content[..]).unwrap();
+        }
+
+        let tar_data = builder.into_inner().unwrap();
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&tar_data).unwrap();
+        let gz_data = encoder.finish().unwrap();
+
+        let installed = installer.extract_tar_gz(&gz_data).unwrap();
+
+        // Only meta-plugin should be extracted
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0], "meta-plugin");
+        assert!(dir.path().join("meta-plugin").exists());
+        assert!(!dir.path().join("readme.txt").exists());
+        assert!(!dir.path().join("other-binary").exists());
+    }
+
+    #[test]
+    fn test_extract_zip() {
+        use std::io::Write;
+        use zip::write::FileOptions;
+
+        let dir = tempfile::tempdir().unwrap();
+        let installer = PluginInstaller {
+            plugins_dir: dir.path().to_path_buf(),
+            verbose: false,
+        };
+
+        // Create a minimal zip with a meta-test file
+        let mut zip_data = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_data));
+            let options = FileOptions::default();
+            zip.start_file("meta-test", options).unwrap();
+            zip.write_all(b"#!/bin/sh\necho test").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let installed = installer.extract_zip(&zip_data).unwrap();
+
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0], "meta-test");
+        assert!(dir.path().join("meta-test").exists());
+    }
+
+    #[test]
+    fn test_extract_zip_filters_non_meta_files() {
+        use std::io::Write;
+        use zip::write::FileOptions;
+
+        let dir = tempfile::tempdir().unwrap();
+        let installer = PluginInstaller {
+            plugins_dir: dir.path().to_path_buf(),
+            verbose: false,
+        };
+
+        // Create a zip with both meta-* and non-meta files
+        let mut zip_data = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_data));
+            let options = FileOptions::default();
+
+            for name in &["meta-plugin", "readme.txt", "other-binary"] {
+                zip.start_file(*name, options).unwrap();
+                zip.write_all(b"content").unwrap();
+            }
+            zip.finish().unwrap();
+        }
+
+        let installed = installer.extract_zip(&zip_data).unwrap();
+
+        // Only meta-plugin should be extracted
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0], "meta-plugin");
+        assert!(dir.path().join("meta-plugin").exists());
+        assert!(!dir.path().join("readme.txt").exists());
+        assert!(!dir.path().join("other-binary").exists());
+    }
+
+    #[test]
+    fn test_extract_archive_unsupported_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = PluginInstaller {
+            plugins_dir: dir.path().to_path_buf(),
+            verbose: false,
+        };
+
+        let result = installer.extract_archive("https://example.com/plugin.exe", &[]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unsupported"));
     }
 }

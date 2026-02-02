@@ -871,12 +871,12 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
                 // Registry-based install
                 let client = RegistryClient::new(verbose)?;
                 let metadata = client.fetch_plugin_metadata(&name)?;
-                installer.install(&metadata)?;
+                let installed = installer.install(&metadata)?;
 
                 if !json {
                     println!(
-                        "Successfully installed {} v{}",
-                        metadata.name, metadata.version
+                        "Successfully installed {} v{} ({})",
+                        metadata.name, metadata.version, installed.join(", ")
                     );
                 }
             }
