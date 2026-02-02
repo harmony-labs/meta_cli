@@ -5,6 +5,7 @@
 //! install plugins directly from the registry.
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -33,6 +34,94 @@ pub fn ensure_plugin_prefix(name: &str) -> String {
 fn is_plugin_binary(name: &str) -> bool {
     name.starts_with(PLUGIN_PREFIX)
         && !EXCLUDED_EXTENSIONS.iter().any(|ext| name.ends_with(ext))
+}
+
+/// Plugin manifest entry tracking installation metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginManifestEntry {
+    /// Installation source (URL, GitHub shorthand, or registry name)
+    pub source: String,
+    /// Plugin version (if known)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Installation timestamp (ISO 8601)
+    pub installed: String,
+    /// Platform the plugin was installed for
+    pub platform: String,
+}
+
+/// Plugin manifest file (~/.meta/plugins/.manifest.json)
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PluginManifest {
+    pub plugins: HashMap<String, PluginManifestEntry>,
+}
+
+/// Detailed plugin information for list command
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginInfo {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub location: PluginLocation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed: Option<String>,
+}
+
+/// Where a plugin is installed
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PluginLocation {
+    /// Installed in ~/.meta/plugins/
+    Installed,
+    /// Found in PATH (bundled with meta)
+    Bundled,
+    /// Found in project-local .meta/plugins/
+    ProjectLocal,
+}
+
+impl PluginManifest {
+    /// Load manifest from file, or return empty manifest if not found
+    pub fn load(manifest_path: &Path) -> Result<Self> {
+        if !manifest_path.exists() {
+            return Ok(Self::default());
+        }
+
+        let content = std::fs::read_to_string(manifest_path)
+            .with_context(|| format!("Failed to read manifest from {}", manifest_path.display()))?;
+
+        let manifest: Self = serde_json::from_str(&content)
+            .with_context(|| "Failed to parse plugin manifest")?;
+
+        Ok(manifest)
+    }
+
+    /// Save manifest to file
+    pub fn save(&self, manifest_path: &Path) -> Result<()> {
+        let json = serde_json::to_string_pretty(self)
+            .with_context(|| "Failed to serialize manifest")?;
+
+        std::fs::write(manifest_path, json)
+            .with_context(|| format!("Failed to write manifest to {}", manifest_path.display()))?;
+
+        Ok(())
+    }
+
+    /// Add or update a plugin entry
+    pub fn add_plugin(&mut self, name: String, entry: PluginManifestEntry) {
+        self.plugins.insert(name, entry);
+    }
+
+    /// Remove a plugin entry
+    pub fn remove_plugin(&mut self, name: &str) -> Option<PluginManifestEntry> {
+        self.plugins.remove(name)
+    }
+
+    /// Get a plugin entry
+    pub fn get_plugin(&self, name: &str) -> Option<&PluginManifestEntry> {
+        self.plugins.get(name)
+    }
 }
 
 /// Plugin metadata from the registry
@@ -396,6 +485,45 @@ impl PluginInstaller {
         })
     }
 
+    /// Get the manifest file path
+    fn manifest_path(&self) -> PathBuf {
+        self.plugins_dir.join(".manifest.json")
+    }
+
+    /// Load the plugin manifest
+    fn load_manifest(&self) -> Result<PluginManifest> {
+        PluginManifest::load(&self.manifest_path())
+    }
+
+    /// Save the plugin manifest
+    fn save_manifest(&self, manifest: &PluginManifest) -> Result<()> {
+        self.ensure_plugins_dir()?;
+        manifest.save(&self.manifest_path())
+    }
+
+    /// Record a plugin installation in the manifest
+    fn record_installation(
+        &self,
+        plugin_name: &str,
+        source: String,
+        version: Option<String>,
+    ) -> Result<()> {
+        let mut manifest = self.load_manifest()?;
+
+        let entry = PluginManifestEntry {
+            source,
+            version,
+            installed: chrono::Utc::now().to_rfc3339(),
+            platform: RegistryClient::current_platform(),
+        };
+
+        manifest.add_plugin(plugin_name.to_string(), entry);
+        self.save_manifest(&manifest)?;
+
+        debug!("Recorded {} in manifest", plugin_name);
+        Ok(())
+    }
+
     /// Download bytes from a URL
     fn download(&self, url: &str) -> Result<Vec<u8>> {
         let response = ureq::get(url)
@@ -434,6 +562,15 @@ impl PluginInstaller {
         let bytes = self.download(&download_url)?;
         let installed = self.extract_and_validate(&download_url, &bytes)?;
 
+        // Record installation in manifest
+        for plugin_name in &installed {
+            self.record_installation(
+                plugin_name,
+                metadata.name.clone(),
+                Some(metadata.version.clone()),
+            )?;
+        }
+
         info!(
             "Successfully installed {} v{}",
             metadata.name, metadata.version
@@ -451,6 +588,11 @@ impl PluginInstaller {
 
         let bytes = self.download(url)?;
         let installed = self.extract_and_validate(url, &bytes)?;
+
+        // Record installation in manifest
+        for plugin_name in &installed {
+            self.record_installation(plugin_name, url.to_string(), None)?;
+        }
 
         let primary_plugin = installed.first().unwrap().clone();
         info!("Successfully installed: {}", installed.join(", "));
@@ -488,6 +630,25 @@ impl PluginInstaller {
                 Ok(bytes) => {
                     // Successfully downloaded, now extract and validate
                     let installed = self.extract_and_validate(url, &bytes)?;
+
+                    // Record installation in manifest
+                    let source = format!(
+                        "{}/{}{}",
+                        shorthand.user,
+                        shorthand.repo,
+                        shorthand
+                            .version
+                            .as_ref()
+                            .map(|v| format!("@{}", v))
+                            .unwrap_or_default()
+                    );
+                    for plugin_name in &installed {
+                        self.record_installation(
+                            plugin_name,
+                            source.clone(),
+                            shorthand.version.clone(),
+                        )?;
+                    }
 
                     let primary_plugin = installed.first().unwrap().clone();
                     info!("Successfully installed: {}", installed.join(", "));
@@ -743,6 +904,36 @@ impl PluginInstaller {
         Ok(plugins)
     }
 
+    /// List plugins with detailed information including manifest data
+    pub fn list_plugins_detailed(&self) -> Result<Vec<PluginInfo>> {
+        let mut plugins = Vec::new();
+        let manifest = self.load_manifest()?;
+
+        // Scan installed plugins directory
+        if self.plugins_dir.exists() {
+            for entry in std::fs::read_dir(&self.plugins_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if is_plugin_binary(name) {
+                        // Get manifest data if available
+                        let manifest_entry = manifest.get_plugin(name);
+
+                        plugins.push(PluginInfo {
+                            name: name.to_string(),
+                            version: manifest_entry.and_then(|e| e.version.clone()),
+                            source: manifest_entry.map(|e| e.source.clone()),
+                            location: PluginLocation::Installed,
+                            installed: manifest_entry.map(|e| e.installed.clone()),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(plugins)
+    }
+
     /// Uninstall a plugin
     pub fn uninstall(&self, name: &str) -> Result<()> {
         let plugin_name = ensure_plugin_prefix(name);
@@ -751,6 +942,12 @@ impl PluginInstaller {
         if plugin_path.exists() {
             std::fs::remove_file(&plugin_path)
                 .with_context(|| format!("Failed to remove {}", plugin_path.display()))?;
+
+            // Remove from manifest
+            let mut manifest = self.load_manifest()?;
+            manifest.remove_plugin(&plugin_name);
+            self.save_manifest(&manifest)?;
+
             info!("Uninstalled {}", plugin_name);
             Ok(())
         } else {
@@ -1341,5 +1538,131 @@ mod tests {
 
         // Note: The actual removal happens in validate_plugin's error context,
         // so the file may or may not exist depending on the error
+    }
+
+    #[test]
+    fn test_plugin_manifest_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join(".manifest.json");
+
+        let mut manifest = PluginManifest::default();
+        manifest.add_plugin(
+            "meta-test".to_string(),
+            PluginManifestEntry {
+                source: "test-user/meta-test".to_string(),
+                version: Some("v1.0.0".to_string()),
+                installed: "2024-01-01T00:00:00Z".to_string(),
+                platform: "darwin-arm64".to_string(),
+            },
+        );
+
+        // Save manifest
+        manifest.save(&manifest_path).unwrap();
+        assert!(manifest_path.exists());
+
+        // Load manifest
+        let loaded = PluginManifest::load(&manifest_path).unwrap();
+        assert_eq!(loaded.plugins.len(), 1);
+
+        let entry = loaded.get_plugin("meta-test").unwrap();
+        assert_eq!(entry.source, "test-user/meta-test");
+        assert_eq!(entry.version.as_deref(), Some("v1.0.0"));
+    }
+
+    #[test]
+    fn test_plugin_manifest_add_remove() {
+        let mut manifest = PluginManifest::default();
+
+        // Add plugin
+        manifest.add_plugin(
+            "meta-test".to_string(),
+            PluginManifestEntry {
+                source: "test-user/meta-test".to_string(),
+                version: None,
+                installed: "2024-01-01T00:00:00Z".to_string(),
+                platform: "linux-x64".to_string(),
+            },
+        );
+        assert_eq!(manifest.plugins.len(), 1);
+
+        // Remove plugin
+        let removed = manifest.remove_plugin("meta-test");
+        assert!(removed.is_some());
+        assert_eq!(manifest.plugins.len(), 0);
+
+        // Remove non-existent plugin
+        let removed = manifest.remove_plugin("meta-nonexistent");
+        assert!(removed.is_none());
+    }
+
+    #[test]
+    fn test_plugin_manifest_load_nonexistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("nonexistent.json");
+
+        // Loading non-existent manifest should return empty manifest
+        let manifest = PluginManifest::load(&manifest_path).unwrap();
+        assert_eq!(manifest.plugins.len(), 0);
+    }
+
+    #[test]
+    fn test_plugin_info_serialization() {
+        let info = PluginInfo {
+            name: "meta-test".to_string(),
+            version: Some("v1.0.0".to_string()),
+            source: Some("test-user/meta-test".to_string()),
+            location: PluginLocation::Installed,
+            installed: Some("2024-01-01T00:00:00Z".to_string()),
+        };
+
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("meta-test"));
+        assert!(json.contains("v1.0.0"));
+        assert!(json.contains("installed"));
+    }
+
+    #[test]
+    fn test_list_plugins_detailed_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = PluginInstaller {
+            plugins_dir: dir.path().to_path_buf(),
+            verbose: false,
+        };
+
+        let plugins = installer.list_plugins_detailed().unwrap();
+        assert!(plugins.is_empty());
+    }
+
+    #[test]
+    fn test_list_plugins_detailed_with_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = PluginInstaller {
+            plugins_dir: dir.path().to_path_buf(),
+            verbose: false,
+        };
+
+        // Create plugin file
+        std::fs::create_dir_all(&dir.path()).unwrap();
+        std::fs::write(dir.path().join("meta-test"), b"fake plugin").unwrap();
+
+        // Create manifest
+        let mut manifest = PluginManifest::default();
+        manifest.add_plugin(
+            "meta-test".to_string(),
+            PluginManifestEntry {
+                source: "test-user/meta-test".to_string(),
+                version: Some("v1.0.0".to_string()),
+                installed: "2024-01-01T00:00:00Z".to_string(),
+                platform: "darwin-arm64".to_string(),
+            },
+        );
+        installer.save_manifest(&manifest).unwrap();
+
+        // List plugins
+        let plugins = installer.list_plugins_detailed().unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].name, "meta-test");
+        assert_eq!(plugins[0].version.as_deref(), Some("v1.0.0"));
+        assert_eq!(plugins[0].source.as_deref(), Some("test-user/meta-test"));
     }
 }

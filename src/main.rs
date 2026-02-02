@@ -822,7 +822,7 @@ fn handle_command_dispatch(
 
 /// Handle plugin management subcommands with typed args.
 fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: bool) -> Result<()> {
-    use registry::{PluginInstaller, RegistryClient};
+    use registry::{PluginInstaller, RegistryClient, PLUGIN_PREFIX};
 
     let command = match command {
         Some(cmd) => cmd,
@@ -891,16 +891,27 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
         }
         PluginCommands::List => {
             let installer = PluginInstaller::new(verbose)?;
-            let plugins = installer.list_installed()?;
+            let plugins = installer.list_plugins_detailed()?;
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&plugins)?);
             } else if plugins.is_empty() {
                 println!("No plugins installed");
             } else {
-                println!("Installed plugins:");
+                println!("Installed plugins ({}):", plugins.len());
+                println!();
+                println!("{:<20} {:<15} {:<30} {:<15}", "NAME", "VERSION", "SOURCE", "LOCATION");
+                println!("{}", "-".repeat(80));
                 for plugin in plugins {
-                    println!("  {plugin}");
+                    let name = plugin.name.strip_prefix(PLUGIN_PREFIX).unwrap_or(&plugin.name);
+                    let version = plugin.version.as_deref().unwrap_or("-");
+                    let source = plugin.source.as_deref().unwrap_or("-");
+                    let location = match plugin.location {
+                        registry::PluginLocation::Installed => "installed",
+                        registry::PluginLocation::Bundled => "bundled",
+                        registry::PluginLocation::ProjectLocal => "project-local",
+                    };
+                    println!("{:<20} {:<15} {:<30} {:<15}", name, version, source, location);
                 }
             }
         }
