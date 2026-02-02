@@ -239,6 +239,72 @@ impl ArchiveFormat {
     }
 }
 
+/// Parsed GitHub shorthand: user/repo[@version]
+#[derive(Debug, Clone, PartialEq)]
+pub struct GitHubShorthand {
+    pub user: String,
+    pub repo: String,
+    pub version: Option<String>,
+}
+
+impl GitHubShorthand {
+    /// Parse a GitHub shorthand string (user/repo or user/repo@version)
+    ///
+    /// Returns None if the input doesn't match the expected format.
+    pub fn parse(input: &str) -> Option<Self> {
+        // Must not start with http
+        if input.starts_with("http://") || input.starts_with("https://") {
+            return None;
+        }
+
+        let parts: Vec<&str> = input.splitn(2, '/').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+
+        let user = parts[0].to_string();
+        let repo_and_version = parts[1];
+
+        // Reject if repo contains additional slashes
+        if repo_and_version.matches('/').count() > 0 {
+            return None;
+        }
+
+        // Check for @version suffix
+        if let Some(at_pos) = repo_and_version.find('@') {
+            let repo = repo_and_version[..at_pos].to_string();
+            let version = repo_and_version[at_pos + 1..].to_string();
+
+            if user.is_empty() || repo.is_empty() || version.is_empty() {
+                return None;
+            }
+
+            Some(Self {
+                user,
+                repo,
+                version: Some(version),
+            })
+        } else {
+            let repo = repo_and_version.to_string();
+
+            if user.is_empty() || repo.is_empty() {
+                return None;
+            }
+
+            Some(Self {
+                user,
+                repo,
+                version: None,
+            })
+        }
+    }
+
+    /// Extract the plugin name from the repo (strips meta- prefix if present)
+    pub fn plugin_name(&self) -> &str {
+        self.repo.strip_prefix("meta-").unwrap_or(&self.repo)
+    }
+}
+
 /// Make a file executable on Unix systems (chmod 755)
 #[cfg(unix)]
 fn make_executable(path: &Path) -> Result<()> {
@@ -361,6 +427,149 @@ impl PluginInstaller {
         }
 
         Ok(primary_plugin)
+    }
+
+    /// Install a plugin from GitHub using shorthand syntax (user/repo[@version])
+    ///
+    /// Automatically discovers the correct platform binary from GitHub Releases
+    /// by trying multiple naming conventions and formats.
+    pub fn install_from_github(&self, shorthand: &GitHubShorthand) -> Result<String> {
+        let platform = RegistryClient::current_platform();
+
+        if self.verbose {
+            if let Some(version) = &shorthand.version {
+                println!("Installing {}/{}@{version} for {platform}", shorthand.user, shorthand.repo);
+            } else {
+                println!("Installing {}/{} (latest) for {platform}", shorthand.user, shorthand.repo);
+            }
+        }
+
+        // Try to download with various URL patterns
+        let urls = self.construct_github_urls(shorthand, platform);
+
+        let mut last_error = None;
+        for url in &urls {
+            if self.verbose {
+                println!("Trying: {url}");
+            }
+
+            match self.download(url) {
+                Ok(bytes) => {
+                    // Successfully downloaded, now extract and validate
+                    self.ensure_plugins_dir()?;
+                    let installed = self.extract_archive(url, &bytes)?;
+                    self.validate_installed(&installed)?;
+
+                    let primary_plugin = installed.first().unwrap().clone();
+                    if self.verbose {
+                        println!("Successfully installed: {}", installed.join(", "));
+                    }
+                    return Ok(primary_plugin);
+                }
+                Err(e) => {
+                    last_error = Some(e);
+                    continue;
+                }
+            }
+        }
+
+        // If we get here, none of the URLs worked
+        anyhow::bail!(
+            "Could not find release for {}/{}{}\nTried {} URL(s). Last error: {}",
+            shorthand.user,
+            shorthand.repo,
+            shorthand.version.as_ref().map(|v| format!("@{v}")).unwrap_or_default(),
+            urls.len(),
+            last_error.unwrap()
+        )
+    }
+
+    /// Construct possible GitHub release URLs for a shorthand
+    fn construct_github_urls(&self, shorthand: &GitHubShorthand, platform: &str) -> Vec<String> {
+        let mut urls = Vec::new();
+        let base = format!("https://github.com/{}/{}/releases", shorthand.user, shorthand.repo);
+
+        // Determine version component
+        let version_paths = if let Some(version) = &shorthand.version {
+            // Try both with and without 'v' prefix
+            if version.starts_with('v') {
+                // If version already has 'v', try with and without
+                vec![
+                    format!("download/{version}"),
+                    format!("download/{}", version.strip_prefix('v').unwrap()),
+                ]
+            } else {
+                // If version doesn't have 'v', try both
+                vec![
+                    format!("download/{version}"),
+                    format!("download/v{version}"),
+                ]
+            }
+        } else {
+            vec!["latest/download".to_string()]
+        };
+
+        // Platform aliases (try both forms)
+        let platform_variants = Self::platform_aliases(platform);
+
+        // Plugin name variants
+        let plugin_names = vec![
+            shorthand.repo.clone(),
+            shorthand.plugin_name().to_string(),
+        ];
+
+        // Archive formats
+        let formats = vec!["tar.gz", "tgz"];
+
+        // Generate all combinations
+        for ver_path in &version_paths {
+            for plugin_name in &plugin_names {
+                for plat in &platform_variants {
+                    for fmt in &formats {
+                        urls.push(format!("{base}/{ver_path}/{plugin_name}-{plat}.{fmt}"));
+                    }
+                }
+                // Also try -any suffix (platform-independent)
+                for fmt in &formats {
+                    urls.push(format!("{base}/{ver_path}/{plugin_name}-any.{fmt}"));
+                }
+            }
+        }
+
+        urls
+    }
+
+    /// Get platform naming aliases (darwin ↔ macos, x64 ↔ amd64, etc.)
+    fn platform_aliases(platform: &str) -> Vec<String> {
+        let mut aliases = vec![platform.to_string()];
+
+        // Common platform naming variations
+        if platform.contains("darwin") {
+            aliases.push(platform.replace("darwin", "macos"));
+        } else if platform.contains("macos") {
+            aliases.push(platform.replace("macos", "darwin"));
+        }
+
+        if platform.contains("x64") {
+            aliases.push(platform.replace("x64", "amd64"));
+            aliases.push(platform.replace("x64", "x86_64"));
+        } else if platform.contains("amd64") {
+            aliases.push(platform.replace("amd64", "x64"));
+            aliases.push(platform.replace("amd64", "x86_64"));
+        } else if platform.contains("x86_64") {
+            aliases.push(platform.replace("x86_64", "x64"));
+            aliases.push(platform.replace("x86_64", "amd64"));
+        }
+
+        if platform.contains("arm64") {
+            aliases.push(platform.replace("arm64", "aarch64"));
+        } else if platform.contains("aarch64") {
+            aliases.push(platform.replace("aarch64", "arm64"));
+        }
+
+        aliases.sort();
+        aliases.dedup();
+        aliases
     }
 
     /// Validate a list of installed plugins
@@ -860,5 +1069,112 @@ mod tests {
         let result = installer.extract_archive("https://example.com/plugin.exe", &[]);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unsupported"));
+    }
+
+    #[test]
+    fn test_github_shorthand_parse_simple() {
+        let shorthand = GitHubShorthand::parse("someuser/meta-docker").unwrap();
+        assert_eq!(shorthand.user, "someuser");
+        assert_eq!(shorthand.repo, "meta-docker");
+        assert_eq!(shorthand.version, None);
+    }
+
+    #[test]
+    fn test_github_shorthand_parse_with_version() {
+        let shorthand = GitHubShorthand::parse("someuser/meta-docker@v1.0.0").unwrap();
+        assert_eq!(shorthand.user, "someuser");
+        assert_eq!(shorthand.repo, "meta-docker");
+        assert_eq!(shorthand.version, Some("v1.0.0".to_string()));
+    }
+
+    #[test]
+    fn test_github_shorthand_parse_without_v_prefix() {
+        let shorthand = GitHubShorthand::parse("someuser/meta-docker@1.0.0").unwrap();
+        assert_eq!(shorthand.user, "someuser");
+        assert_eq!(shorthand.repo, "meta-docker");
+        assert_eq!(shorthand.version, Some("1.0.0".to_string()));
+    }
+
+    #[test]
+    fn test_github_shorthand_parse_rejects_url() {
+        assert_eq!(GitHubShorthand::parse("https://github.com/user/repo"), None);
+        assert_eq!(GitHubShorthand::parse("http://example.com/plugin"), None);
+    }
+
+    #[test]
+    fn test_github_shorthand_parse_rejects_invalid() {
+        assert_eq!(GitHubShorthand::parse("justname"), None);
+        assert_eq!(GitHubShorthand::parse("too/many/slashes"), None);
+        assert_eq!(GitHubShorthand::parse("/nouserorgrepo"), None);
+        assert_eq!(GitHubShorthand::parse("nouser/"), None);
+        assert_eq!(GitHubShorthand::parse("user/@"), None);
+    }
+
+    #[test]
+    fn test_github_shorthand_plugin_name() {
+        let shorthand = GitHubShorthand::parse("user/meta-docker").unwrap();
+        assert_eq!(shorthand.plugin_name(), "docker");
+
+        let shorthand = GitHubShorthand::parse("user/docker").unwrap();
+        assert_eq!(shorthand.plugin_name(), "docker");
+    }
+
+    #[test]
+    fn test_platform_aliases_darwin() {
+        let aliases = PluginInstaller::platform_aliases("darwin-arm64");
+        assert!(aliases.contains(&"darwin-arm64".to_string()));
+        assert!(aliases.contains(&"macos-arm64".to_string()));
+        assert!(aliases.contains(&"darwin-aarch64".to_string()));
+    }
+
+    #[test]
+    fn test_platform_aliases_x64() {
+        let aliases = PluginInstaller::platform_aliases("linux-x64");
+        assert!(aliases.contains(&"linux-x64".to_string()));
+        assert!(aliases.contains(&"linux-amd64".to_string()));
+        assert!(aliases.contains(&"linux-x86_64".to_string()));
+    }
+
+    #[test]
+    fn test_construct_github_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = PluginInstaller {
+            plugins_dir: dir.path().to_path_buf(),
+            verbose: false,
+        };
+
+        let shorthand = GitHubShorthand::parse("user/meta-docker@v1.0.0").unwrap();
+        let urls = installer.construct_github_urls(&shorthand, "darwin-arm64");
+
+        // Should contain versioned URLs
+        assert!(urls.iter().any(|u| u.contains("download/v1.0.0")));
+        assert!(urls.iter().any(|u| u.contains("download/1.0.0")));
+
+        // Should contain platform variants
+        assert!(urls.iter().any(|u| u.contains("darwin-arm64")));
+        assert!(urls.iter().any(|u| u.contains("macos-arm64")));
+
+        // Should contain format variants
+        assert!(urls.iter().any(|u| u.ends_with(".tar.gz")));
+        assert!(urls.iter().any(|u| u.ends_with(".tgz")));
+
+        // Should contain -any variant
+        assert!(urls.iter().any(|u| u.contains("-any.")));
+    }
+
+    #[test]
+    fn test_construct_github_urls_latest() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = PluginInstaller {
+            plugins_dir: dir.path().to_path_buf(),
+            verbose: false,
+        };
+
+        let shorthand = GitHubShorthand::parse("user/meta-docker").unwrap();
+        let urls = installer.construct_github_urls(&shorthand, "linux-x64");
+
+        // Should use latest/download for unversioned
+        assert!(urls.iter().any(|u| u.contains("latest/download")));
+        assert!(urls.iter().all(|u| !u.contains("download/v")));
     }
 }

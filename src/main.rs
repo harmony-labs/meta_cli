@@ -859,11 +859,19 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
             }
         }
         PluginCommands::Install { name } => {
+            use registry::GitHubShorthand;
             let installer = PluginInstaller::new(verbose)?;
 
-            // Detect if input is a direct URL
+            // Detect input type and route accordingly
             if name.starts_with("http://") || name.starts_with("https://") {
+                // Direct URL install
                 let plugin_name = installer.install_from_url(&name)?;
+                if !json {
+                    println!("Successfully installed {plugin_name}");
+                }
+            } else if let Some(shorthand) = GitHubShorthand::parse(&name) {
+                // GitHub shorthand install (user/repo[@version])
+                let plugin_name = installer.install_from_github(&shorthand)?;
                 if !json {
                     println!("Successfully installed {plugin_name}");
                 }
