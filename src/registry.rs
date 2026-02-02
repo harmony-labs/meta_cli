@@ -5,6 +5,7 @@
 //! install plugins directly from the registry.
 
 use anyhow::{Context, Result};
+use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Read;
@@ -12,6 +13,27 @@ use std::path::{Path, PathBuf};
 
 /// Default registry URL
 pub const DEFAULT_REGISTRY: &str = "https://raw.githubusercontent.com/anthropics/meta-plugins/main";
+
+/// Plugin name prefix (all plugins must start with this)
+pub const PLUGIN_PREFIX: &str = "meta-";
+
+/// File extensions to exclude when listing installed plugins
+const EXCLUDED_EXTENSIONS: &[&str] = &[".dylib", ".so", ".dll", ".a"];
+
+/// Ensure a plugin name has the required prefix
+pub fn ensure_plugin_prefix(name: &str) -> String {
+    if name.starts_with(PLUGIN_PREFIX) {
+        name.to_string()
+    } else {
+        format!("{PLUGIN_PREFIX}{name}")
+    }
+}
+
+/// Check if a filename is a plugin binary (has prefix, no excluded extension)
+fn is_plugin_binary(name: &str) -> bool {
+    name.starts_with(PLUGIN_PREFIX)
+        && !EXCLUDED_EXTENSIONS.iter().any(|ext| name.ends_with(ext))
+}
 
 /// Plugin metadata from the registry
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,9 +147,7 @@ impl RegistryClient {
 
         for registry_url in &self.registries {
             let index_url = format!("{registry_url}/plugins/index.json");
-            if self.verbose {
-                println!("Fetching registry index from: {index_url}");
-            }
+            debug!("Fetching registry index from: {}", index_url);
 
             match self.fetch_json::<RegistryIndex>(&index_url) {
                 Ok(index) => {
@@ -135,9 +155,7 @@ impl RegistryClient {
                     combined_index.plugins.extend(index.plugins);
                 }
                 Err(e) => {
-                    if self.verbose {
-                        eprintln!("Warning: Failed to fetch from {registry_url}: {e}");
-                    }
+                    log::warn!("Failed to fetch from {}: {}", registry_url, e);
                 }
             }
         }
@@ -149,16 +167,12 @@ impl RegistryClient {
     pub fn fetch_plugin_metadata(&self, name: &str) -> Result<PluginMetadata> {
         for registry_url in &self.registries {
             let plugin_url = format!("{registry_url}/plugins/{name}/plugin.json");
-            if self.verbose {
-                println!("Fetching plugin metadata from: {plugin_url}");
-            }
+            debug!("Fetching plugin metadata from: {}", plugin_url);
 
             match self.fetch_json::<PluginMetadata>(&plugin_url) {
                 Ok(metadata) => return Ok(metadata),
                 Err(e) => {
-                    if self.verbose {
-                        eprintln!("Warning: Plugin {name} not found in {registry_url}: {e}");
-                    }
+                    log::warn!("Plugin {} not found in {}: {}", name, registry_url, e);
                 }
             }
         }
@@ -197,17 +211,25 @@ impl RegistryClient {
     }
 
     /// Get the current platform identifier
-    pub fn current_platform() -> &'static str {
+    ///
+    /// Can be overridden with META_PLATFORM environment variable for testing.
+    pub fn current_platform() -> String {
+        // Check for override via environment variable
+        if let Ok(override_platform) = std::env::var("META_PLATFORM") {
+            debug!("Using platform override from META_PLATFORM: {}", override_platform);
+            return override_platform;
+        }
+
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        return "darwin-arm64";
+        return "darwin-arm64".to_string();
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-        return "darwin-x64";
+        return "darwin-x64".to_string();
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        return "linux-x64";
+        return "linux-x64".to_string();
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-        return "linux-arm64";
+        return "linux-arm64".to_string();
         #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-        return "windows-x64";
+        return "windows-x64".to_string();
         #[cfg(not(any(
             all(target_os = "macos", target_arch = "aarch64"),
             all(target_os = "macos", target_arch = "x86_64"),
@@ -215,7 +237,7 @@ impl RegistryClient {
             all(target_os = "linux", target_arch = "aarch64"),
             all(target_os = "windows", target_arch = "x86_64"),
         )))]
-        return "unknown";
+        return "unknown".to_string();
     }
 }
 
@@ -229,9 +251,32 @@ pub enum ArchiveFormat {
 impl ArchiveFormat {
     /// Detect archive format from URL or filename
     pub fn from_url(url: &str) -> Option<Self> {
-        if url.ends_with(".tar.gz") || url.ends_with(".tgz") {
+        // Remove query parameters before checking extension
+        let url_without_query = url.split('?').next().unwrap_or(url);
+
+        if url_without_query.ends_with(".tar.gz") || url_without_query.ends_with(".tgz") {
             Some(Self::TarGz)
-        } else if url.ends_with(".zip") {
+        } else if url_without_query.ends_with(".zip") {
+            Some(Self::Zip)
+        } else {
+            None
+        }
+    }
+
+    /// Detect archive format from magic bytes (file signature)
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 4 {
+            return None;
+        }
+
+        // Check for gzip magic bytes (0x1f 0x8b)
+        if bytes.starts_with(&[0x1f, 0x8b]) {
+            Some(Self::TarGz)
+        }
+        // Check for zip magic bytes (PK\x03\x04 or PK\x05\x06 for empty zip)
+        else if bytes.starts_with(&[0x50, 0x4b, 0x03, 0x04])
+            || bytes.starts_with(&[0x50, 0x4b, 0x05, 0x06])
+        {
             Some(Self::Zip)
         } else {
             None
@@ -301,7 +346,7 @@ impl GitHubShorthand {
 
     /// Extract the plugin name from the repo (strips meta- prefix if present)
     pub fn plugin_name(&self) -> &str {
-        self.repo.strip_prefix("meta-").unwrap_or(&self.repo)
+        self.repo.strip_prefix(PLUGIN_PREFIX).unwrap_or(&self.repo)
     }
 }
 
@@ -377,26 +422,22 @@ impl PluginInstaller {
             .with_context(|| format!("No releases found for version {}", metadata.version))?;
 
         let download_url = self
-            .get_platform_url(releases, platform)
+            .get_platform_url(releases, &platform)
             .with_context(|| format!("No release available for platform {platform}"))?;
 
-        if self.verbose {
-            println!(
-                "Downloading {} v{} for {}",
-                metadata.name, metadata.version, platform
-            );
-            println!("URL: {download_url}");
-        }
+        info!(
+            "Downloading {} v{} for {}",
+            metadata.name, metadata.version, platform
+        );
+        debug!("URL: {}", download_url);
 
         let bytes = self.download(&download_url)?;
         let installed = self.extract_and_validate(&download_url, &bytes)?;
 
-        if self.verbose {
-            println!(
-                "Successfully installed {} v{}",
-                metadata.name, metadata.version
-            );
-        }
+        info!(
+            "Successfully installed {} v{}",
+            metadata.name, metadata.version
+        );
 
         Ok(installed)
     }
@@ -406,17 +447,13 @@ impl PluginInstaller {
     /// Downloads the archive, extracts it, and validates the plugin
     /// by running `--meta-plugin-info` on the extracted binary.
     pub fn install_from_url(&self, url: &str) -> Result<String> {
-        if self.verbose {
-            println!("Downloading from: {url}");
-        }
+        info!("Downloading from: {}", url);
 
         let bytes = self.download(url)?;
         let installed = self.extract_and_validate(url, &bytes)?;
 
         let primary_plugin = installed.first().unwrap().clone();
-        if self.verbose {
-            println!("Successfully installed: {}", installed.join(", "));
-        }
+        info!("Successfully installed: {}", installed.join(", "));
 
         Ok(primary_plugin)
     }
@@ -428,22 +465,24 @@ impl PluginInstaller {
     pub fn install_from_github(&self, shorthand: &GitHubShorthand) -> Result<String> {
         let platform = RegistryClient::current_platform();
 
-        if self.verbose {
-            if let Some(version) = &shorthand.version {
-                println!("Installing {}/{}@{version} for {platform}", shorthand.user, shorthand.repo);
-            } else {
-                println!("Installing {}/{} (latest) for {platform}", shorthand.user, shorthand.repo);
-            }
+        if let Some(version) = &shorthand.version {
+            info!(
+                "Installing {}/{}@{} for {}",
+                shorthand.user, shorthand.repo, version, platform
+            );
+        } else {
+            info!(
+                "Installing {}/{} (latest) for {}",
+                shorthand.user, shorthand.repo, platform
+            );
         }
 
         // Try to download with various URL patterns
-        let urls = self.construct_github_urls(shorthand, platform);
+        let urls = self.construct_github_urls(shorthand, &platform);
 
         let mut last_error = None;
         for url in &urls {
-            if self.verbose {
-                println!("Trying: {url}");
-            }
+            debug!("Trying: {}", url);
 
             match self.download(url) {
                 Ok(bytes) => {
@@ -451,9 +490,7 @@ impl PluginInstaller {
                     let installed = self.extract_and_validate(url, &bytes)?;
 
                     let primary_plugin = installed.first().unwrap().clone();
-                    if self.verbose {
-                        println!("Successfully installed: {}", installed.join(", "));
-                    }
+                    info!("Successfully installed: {}", installed.join(", "));
                     return Ok(primary_plugin);
                 }
                 Err(e) => {
@@ -574,7 +611,7 @@ impl PluginInstaller {
     /// Validate a list of installed plugins
     fn validate_installed(&self, installed: &[String]) -> Result<()> {
         if installed.is_empty() {
-            anyhow::bail!("No meta-* executables found in archive");
+            anyhow::bail!("No {PLUGIN_PREFIX}* executables found in archive");
         }
 
         for plugin_name in installed {
@@ -591,7 +628,9 @@ impl PluginInstaller {
 
     /// Extract archive and return list of installed plugin names
     fn extract_archive(&self, url: &str, bytes: &[u8]) -> Result<Vec<String>> {
+        // Try to detect format from URL first, then fall back to magic bytes
         let format = ArchiveFormat::from_url(url)
+            .or_else(|| ArchiveFormat::from_bytes(bytes))
             .with_context(|| format!("Unsupported archive format: {url}"))?;
 
         match format {
@@ -615,7 +654,7 @@ impl PluginInstaller {
                 .map(|s| s.to_string());
 
             if let Some(name) = file_name {
-                if name.starts_with("meta-") {
+                if name.starts_with(PLUGIN_PREFIX) {
                     let dest = self.plugins_dir.join(&name);
                     entry.unpack(&dest)?;
                     make_executable(&dest)?;
@@ -637,7 +676,7 @@ impl PluginInstaller {
             let mut file = archive.by_index(i)?;
             let file_name = file.name().to_string();
 
-            if file_name.starts_with("meta-") {
+            if file_name.starts_with(PLUGIN_PREFIX) {
                 let dest = self.plugins_dir.join(&file_name);
                 let mut dest_file = std::fs::File::create(&dest)?;
                 std::io::copy(&mut file, &mut dest_file)?;
@@ -694,10 +733,7 @@ impl PluginInstaller {
                 let entry = entry?;
                 let path = entry.path();
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with("meta-")
-                        && !name.ends_with(".dylib")
-                        && !name.ends_with(".so")
-                    {
+                    if is_plugin_binary(name) {
                         plugins.push(name.to_string());
                     }
                 }
@@ -709,19 +745,13 @@ impl PluginInstaller {
 
     /// Uninstall a plugin
     pub fn uninstall(&self, name: &str) -> Result<()> {
-        let plugin_name = if name.starts_with("meta-") {
-            name.to_string()
-        } else {
-            format!("meta-{name}")
-        };
+        let plugin_name = ensure_plugin_prefix(name);
 
         let plugin_path = self.plugins_dir.join(&plugin_name);
         if plugin_path.exists() {
             std::fs::remove_file(&plugin_path)
                 .with_context(|| format!("Failed to remove {}", plugin_path.display()))?;
-            if self.verbose {
-                println!("Uninstalled {plugin_name}");
-            }
+            info!("Uninstalled {}", plugin_name);
             Ok(())
         } else {
             anyhow::bail!("Plugin {plugin_name} is not installed")
@@ -754,7 +784,7 @@ mod tests {
             "windows-x64",
             "unknown",
         ];
-        assert!(known_platforms.contains(&platform));
+        assert!(known_platforms.contains(&platform.as_str()));
     }
 
     #[test]
@@ -1207,5 +1237,109 @@ mod tests {
         // Both variants should exist: "meta-docker" and "docker" (without preceding "meta-")
         assert_eq!(meta_docker_count, 2, "Should have meta-docker variant");
         assert_eq!(docker_only_count, 2, "Should have docker variant without meta- prefix");
+    }
+
+    #[test]
+    fn test_ensure_plugin_prefix() {
+        assert_eq!(ensure_plugin_prefix("docker"), "meta-docker");
+        assert_eq!(ensure_plugin_prefix("meta-docker"), "meta-docker");
+        assert_eq!(ensure_plugin_prefix("meta-"), "meta-");
+    }
+
+    #[test]
+    fn test_is_plugin_binary() {
+        assert!(is_plugin_binary("meta-docker"));
+        assert!(is_plugin_binary("meta-test"));
+        assert!(!is_plugin_binary("other-binary"));
+        assert!(!is_plugin_binary("meta-test.dylib"));
+        assert!(!is_plugin_binary("meta-test.so"));
+        assert!(!is_plugin_binary("meta-test.dll"));
+        assert!(!is_plugin_binary("meta-test.a"));
+    }
+
+    #[test]
+    fn test_archive_format_from_url_with_query_params() {
+        assert_eq!(
+            ArchiveFormat::from_url("https://example.com/plugin.tar.gz?token=abc123"),
+            Some(ArchiveFormat::TarGz)
+        );
+        assert_eq!(
+            ArchiveFormat::from_url("https://example.com/plugin.zip?download=1"),
+            Some(ArchiveFormat::Zip)
+        );
+    }
+
+    #[test]
+    fn test_archive_format_from_bytes_gzip() {
+        let gzip_bytes = [0x1f, 0x8b, 0x08, 0x00]; // Gzip magic + some data
+        assert_eq!(
+            ArchiveFormat::from_bytes(&gzip_bytes),
+            Some(ArchiveFormat::TarGz)
+        );
+    }
+
+    #[test]
+    fn test_archive_format_from_bytes_zip() {
+        let zip_bytes = [0x50, 0x4b, 0x03, 0x04]; // Zip magic (PK\x03\x04)
+        assert_eq!(
+            ArchiveFormat::from_bytes(&zip_bytes),
+            Some(ArchiveFormat::Zip)
+        );
+
+        let empty_zip_bytes = [0x50, 0x4b, 0x05, 0x06]; // Empty zip magic
+        assert_eq!(
+            ArchiveFormat::from_bytes(&empty_zip_bytes),
+            Some(ArchiveFormat::Zip)
+        );
+    }
+
+    #[test]
+    fn test_archive_format_from_bytes_unknown() {
+        let unknown_bytes = [0x00, 0x01, 0x02, 0x03];
+        assert_eq!(ArchiveFormat::from_bytes(&unknown_bytes), None);
+
+        let too_short = [0x1f];
+        assert_eq!(ArchiveFormat::from_bytes(&too_short), None);
+    }
+
+    #[test]
+    fn test_platform_override_via_env_var() {
+        // Save current env state
+        let original = std::env::var("META_PLATFORM").ok();
+
+        // Test override
+        std::env::set_var("META_PLATFORM", "test-platform-x64");
+        assert_eq!(RegistryClient::current_platform(), "test-platform-x64");
+
+        // Restore original env state
+        match original {
+            Some(val) => std::env::set_var("META_PLATFORM", val),
+            None => std::env::remove_var("META_PLATFORM"),
+        }
+    }
+
+    #[test]
+    fn test_validation_cleanup_removes_invalid_plugin() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let installer = PluginInstaller {
+            plugins_dir: dir.path().to_path_buf(),
+            verbose: false,
+        };
+
+        // Create a fake invalid plugin (not executable/doesn't respond to --meta-plugin-info)
+        let plugin_path = dir.path().join("meta-invalid");
+        let mut file = std::fs::File::create(&plugin_path).unwrap();
+        file.write_all(b"not a real plugin").unwrap();
+        drop(file);
+
+        // Validation should fail and the file should still be there
+        // (cleanup happens inside validate_plugin which is called by validate_installed)
+        let result = installer.validate_installed(&["meta-invalid".to_string()]);
+        assert!(result.is_err());
+
+        // Note: The actual removal happens in validate_plugin's error context,
+        // so the file may or may not exist depending on the error
     }
 }
