@@ -7,7 +7,8 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 /// Default registry URL
 pub const DEFAULT_REGISTRY: &str = "https://raw.githubusercontent.com/anthropics/meta-plugins/main";
@@ -235,10 +236,9 @@ impl PluginInstaller {
         })
     }
 
-    /// Get the default plugins directory
+    /// Get the default plugins directory (~/.meta/plugins/)
     fn default_plugins_dir() -> Result<PathBuf> {
-        let home = std::env::var("HOME").context("HOME environment variable not set")?;
-        Ok(PathBuf::from(home).join(".meta-plugins"))
+        meta_core::data_dir::data_subdir("plugins")
     }
 
     /// Install a plugin from the registry
@@ -291,6 +291,147 @@ impl PluginInstaller {
                 metadata.name, metadata.version
             );
         }
+
+        Ok(())
+    }
+
+    /// Install a plugin directly from a URL (bypasses registry)
+    ///
+    /// Downloads the archive, extracts it, and validates the plugin
+    /// by running `--meta-plugin-info` on the extracted binary.
+    pub fn install_from_url(&self, url: &str) -> Result<String> {
+        if self.verbose {
+            println!("Downloading from: {url}");
+        }
+
+        // Create plugins directory if it doesn't exist
+        std::fs::create_dir_all(&self.plugins_dir).with_context(|| {
+            format!(
+                "Failed to create plugins directory: {}",
+                self.plugins_dir.display()
+            )
+        })?;
+
+        // Download the archive
+        let response = ureq::get(url)
+            .call()
+            .with_context(|| format!("Failed to download {url}"))?;
+
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .read_to_end(&mut bytes)
+            .with_context(|| "Failed to read download")?;
+
+        // Extract the archive and collect installed plugin names
+        let installed = self.extract_archive_and_collect(url, &bytes)?;
+
+        if installed.is_empty() {
+            anyhow::bail!("No meta-* executables found in archive");
+        }
+
+        // Validate each installed plugin
+        for plugin_name in &installed {
+            let plugin_path = self.plugins_dir.join(plugin_name);
+            self.validate_plugin(&plugin_path).with_context(|| {
+                // Remove invalid plugin
+                let _ = std::fs::remove_file(&plugin_path);
+                format!("Plugin validation failed for {plugin_name}")
+            })?;
+        }
+
+        let primary_plugin = installed.first().unwrap().clone();
+        if self.verbose {
+            println!("Successfully installed: {}", installed.join(", "));
+        }
+
+        Ok(primary_plugin)
+    }
+
+    /// Extract archive and return list of installed plugin names
+    fn extract_archive_and_collect(&self, url: &str, bytes: &[u8]) -> Result<Vec<String>> {
+        let mut installed = Vec::new();
+
+        if url.ends_with(".tar.gz") || url.ends_with(".tgz") {
+            let decoder = flate2::read::GzDecoder::new(bytes);
+            let mut archive = tar::Archive::new(decoder);
+
+            for entry in archive.entries()? {
+                let mut entry = entry?;
+                let file_name = entry
+                    .path()?
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string());
+
+                if let Some(name) = file_name {
+                    if name.starts_with("meta-") {
+                        let dest = self.plugins_dir.join(&name);
+                        entry.unpack(&dest)?;
+
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let mut perms = std::fs::metadata(&dest)?.permissions();
+                            perms.set_mode(0o755);
+                            std::fs::set_permissions(&dest, perms)?;
+                        }
+
+                        installed.push(name);
+                    }
+                }
+            }
+        } else if url.ends_with(".zip") {
+            let cursor = std::io::Cursor::new(bytes);
+            let mut archive = zip::ZipArchive::new(cursor)?;
+
+            for i in 0..archive.len() {
+                let mut file = archive.by_index(i)?;
+                let file_name = file.name().to_string();
+
+                if file_name.starts_with("meta-") {
+                    let dest = self.plugins_dir.join(&file_name);
+                    let mut dest_file = std::fs::File::create(&dest)?;
+                    std::io::copy(&mut file, &mut dest_file)?;
+
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let mut perms = std::fs::metadata(&dest)?.permissions();
+                        perms.set_mode(0o755);
+                        std::fs::set_permissions(&dest, perms)?;
+                    }
+
+                    installed.push(file_name);
+                }
+            }
+        } else {
+            anyhow::bail!("Unsupported archive format: {url}");
+        }
+
+        Ok(installed)
+    }
+
+    /// Validate a plugin by running --meta-plugin-info
+    fn validate_plugin(&self, plugin_path: &Path) -> Result<()> {
+        use std::process::Command;
+
+        let output = Command::new(plugin_path)
+            .arg("--meta-plugin-info")
+            .output()
+            .with_context(|| format!("Failed to execute {}", plugin_path.display()))?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "Plugin did not respond to --meta-plugin-info (exit code: {:?})",
+                output.status.code()
+            );
+        }
+
+        // Try to parse the output as JSON to verify it's valid
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let _: serde_json::Value = serde_json::from_str(&stdout)
+            .with_context(|| "Plugin --meta-plugin-info output is not valid JSON")?;
 
         Ok(())
     }

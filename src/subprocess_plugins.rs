@@ -42,14 +42,19 @@ impl SubprocessPluginManager {
     }
 
     /// Discover and load all subprocess plugins
+    ///
+    /// Discovery order (first match wins):
+    /// 1. `.meta/plugins/` directories walking up from cwd (project-local)
+    /// 2. `~/.meta/plugins/` (global installed)
+    /// 3. PATH (bundled/system plugins)
     pub fn discover_plugins(&mut self, verbose: bool) -> Result<()> {
         self.verbose = verbose;
         let mut visited = std::collections::HashSet::new();
 
-        // Search in .meta-plugins directories walking up from cwd
+        // Search in .meta/plugins/ directories walking up from cwd (project-local)
         let mut current_dir = std::env::current_dir()?;
         loop {
-            let plugin_dir = current_dir.join(".meta-plugins");
+            let plugin_dir = current_dir.join(".meta").join("plugins");
             if plugin_dir.exists() && plugin_dir.is_dir() && visited.insert(plugin_dir.clone()) {
                 self.scan_directory(&plugin_dir)?;
             }
@@ -60,15 +65,14 @@ impl SubprocessPluginManager {
             }
         }
 
-        // Search in ~/.meta-plugins
-        if let Ok(home) = std::env::var("HOME") {
-            let home_plugins = Path::new(&home).join(".meta-plugins");
-            if home_plugins.exists() && visited.insert(home_plugins.clone()) {
-                self.scan_directory(&home_plugins)?;
+        // Search in ~/.meta/plugins/ (global installed)
+        if let Ok(global_plugins) = meta_core::data_dir::data_subdir("plugins") {
+            if global_plugins.exists() && visited.insert(global_plugins.clone()) {
+                self.scan_directory(&global_plugins)?;
             }
         }
 
-        // Search in PATH for meta-* executables
+        // Search in PATH for meta-* executables (bundled/system)
         if let Ok(path_var) = std::env::var("PATH") {
             for path_dir in path_var.split(':') {
                 let dir = Path::new(path_dir);

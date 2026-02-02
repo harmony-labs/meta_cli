@@ -859,17 +859,26 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
             }
         }
         PluginCommands::Install { name } => {
-            let client = RegistryClient::new(verbose)?;
-            let metadata = client.fetch_plugin_metadata(&name)?;
-
             let installer = PluginInstaller::new(verbose)?;
-            installer.install(&metadata)?;
 
-            if !json {
-                println!(
-                    "Successfully installed {} v{}",
-                    metadata.name, metadata.version
-                );
+            // Detect if input is a direct URL
+            if name.starts_with("http://") || name.starts_with("https://") {
+                let plugin_name = installer.install_from_url(&name)?;
+                if !json {
+                    println!("Successfully installed {plugin_name}");
+                }
+            } else {
+                // Registry-based install
+                let client = RegistryClient::new(verbose)?;
+                let metadata = client.fetch_plugin_metadata(&name)?;
+                installer.install(&metadata)?;
+
+                if !json {
+                    println!(
+                        "Successfully installed {} v{}",
+                        metadata.name, metadata.version
+                    );
+                }
             }
         }
         PluginCommands::List => {
