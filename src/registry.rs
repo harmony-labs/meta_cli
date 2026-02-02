@@ -81,8 +81,7 @@ impl RegistryConfig {
 
     /// Get the config file path
     fn config_path() -> Result<PathBuf> {
-        let home = std::env::var("HOME").context("HOME environment variable not set")?;
-        Ok(PathBuf::from(home).join(".meta").join("config.yaml"))
+        Ok(meta_core::meta_dir().join("config.yaml"))
     }
 
     /// Get list of registries (defaults to the public registry)
@@ -328,19 +327,7 @@ impl PluginInstaller {
 
         // Extract and validate
         let installed = self.extract_archive(&download_url, &bytes)?;
-
-        if installed.is_empty() {
-            anyhow::bail!("No meta-* executables found in archive");
-        }
-
-        // Validate each installed plugin
-        for plugin_name in &installed {
-            let plugin_path = self.plugins_dir.join(plugin_name);
-            self.validate_plugin(&plugin_path).with_context(|| {
-                let _ = std::fs::remove_file(&plugin_path);
-                format!("Plugin validation failed for {plugin_name}")
-            })?;
-        }
+        self.validate_installed(&installed)?;
 
         if self.verbose {
             println!(
@@ -366,20 +353,7 @@ impl PluginInstaller {
 
         // Extract the archive and collect installed plugin names
         let installed = self.extract_archive(url, &bytes)?;
-
-        if installed.is_empty() {
-            anyhow::bail!("No meta-* executables found in archive");
-        }
-
-        // Validate each installed plugin
-        for plugin_name in &installed {
-            let plugin_path = self.plugins_dir.join(plugin_name);
-            self.validate_plugin(&plugin_path).with_context(|| {
-                // Remove invalid plugin
-                let _ = std::fs::remove_file(&plugin_path);
-                format!("Plugin validation failed for {plugin_name}")
-            })?;
-        }
+        self.validate_installed(&installed)?;
 
         let primary_plugin = installed.first().unwrap().clone();
         if self.verbose {
@@ -387,6 +361,24 @@ impl PluginInstaller {
         }
 
         Ok(primary_plugin)
+    }
+
+    /// Validate a list of installed plugins
+    fn validate_installed(&self, installed: &[String]) -> Result<()> {
+        if installed.is_empty() {
+            anyhow::bail!("No meta-* executables found in archive");
+        }
+
+        for plugin_name in installed {
+            let plugin_path = self.plugins_dir.join(plugin_name);
+            self.validate_plugin(&plugin_path).with_context(|| {
+                // Remove invalid plugin on failure
+                let _ = std::fs::remove_file(&plugin_path);
+                format!("Plugin validation failed for {plugin_name}")
+            })?;
+        }
+
+        Ok(())
     }
 
     /// Extract archive and return list of installed plugin names

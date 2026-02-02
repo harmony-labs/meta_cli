@@ -74,10 +74,9 @@ impl SubprocessPluginManager {
 
         // Search in PATH for meta-* executables (bundled/system)
         if let Ok(path_var) = std::env::var("PATH") {
-            for path_dir in path_var.split(':') {
-                let dir = Path::new(path_dir);
-                if dir.exists() && visited.insert(dir.to_path_buf()) {
-                    self.scan_path_directory(dir)?;
+            for path_dir in std::env::split_paths(&path_var) {
+                if path_dir.exists() && visited.insert(path_dir.clone()) {
+                    self.scan_path_directory(&path_dir)?;
                 }
             }
         }
