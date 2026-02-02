@@ -388,12 +388,8 @@ impl PluginInstaller {
             println!("URL: {download_url}");
         }
 
-        self.ensure_plugins_dir()?;
         let bytes = self.download(&download_url)?;
-
-        // Extract and validate
-        let installed = self.extract_archive(&download_url, &bytes)?;
-        self.validate_installed(&installed)?;
+        let installed = self.extract_and_validate(&download_url, &bytes)?;
 
         if self.verbose {
             println!(
@@ -414,12 +410,8 @@ impl PluginInstaller {
             println!("Downloading from: {url}");
         }
 
-        self.ensure_plugins_dir()?;
         let bytes = self.download(url)?;
-
-        // Extract the archive and collect installed plugin names
-        let installed = self.extract_archive(url, &bytes)?;
-        self.validate_installed(&installed)?;
+        let installed = self.extract_and_validate(url, &bytes)?;
 
         let primary_plugin = installed.first().unwrap().clone();
         if self.verbose {
@@ -456,9 +448,7 @@ impl PluginInstaller {
             match self.download(url) {
                 Ok(bytes) => {
                     // Successfully downloaded, now extract and validate
-                    self.ensure_plugins_dir()?;
-                    let installed = self.extract_archive(url, &bytes)?;
-                    self.validate_installed(&installed)?;
+                    let installed = self.extract_and_validate(url, &bytes)?;
 
                     let primary_plugin = installed.first().unwrap().clone();
                     if self.verbose {
@@ -512,11 +502,12 @@ impl PluginInstaller {
         // Platform aliases (try both forms)
         let platform_variants = Self::platform_aliases(platform);
 
-        // Plugin name variants
-        let plugin_names = vec![
-            shorthand.repo.clone(),
-            shorthand.plugin_name().to_string(),
-        ];
+        // Plugin name variants (deduplicate if repo == plugin_name)
+        let mut plugin_names = vec![shorthand.repo.clone()];
+        let stripped = shorthand.plugin_name().to_string();
+        if stripped != shorthand.repo {
+            plugin_names.push(stripped);
+        }
 
         // Archive formats
         let formats = vec!["tar.gz", "tgz"];
@@ -570,6 +561,14 @@ impl PluginInstaller {
         aliases.sort();
         aliases.dedup();
         aliases
+    }
+
+    /// Extract archive and validate all installed plugins
+    fn extract_and_validate(&self, url: &str, bytes: &[u8]) -> Result<Vec<String>> {
+        self.ensure_plugins_dir()?;
+        let installed = self.extract_archive(url, bytes)?;
+        self.validate_installed(&installed)?;
+        Ok(installed)
     }
 
     /// Validate a list of installed plugins
@@ -1176,5 +1175,37 @@ mod tests {
         // Should use latest/download for unversioned
         assert!(urls.iter().any(|u| u.contains("latest/download")));
         assert!(urls.iter().all(|u| !u.contains("download/v")));
+    }
+
+    #[test]
+    fn test_construct_github_urls_deduplicates_plugin_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = PluginInstaller {
+            plugins_dir: dir.path().to_path_buf(),
+            verbose: false,
+        };
+
+        // When repo doesn't have "meta-" prefix, both names would be the same
+        let shorthand = GitHubShorthand::parse("user/docker").unwrap();
+        let urls = installer.construct_github_urls(&shorthand, "linux-x64");
+
+        // Count how many URLs contain "docker-linux-x64" (exact platform match)
+        let docker_count = urls.iter().filter(|u| u.contains("docker-linux-x64")).count();
+
+        // Should appear once per format (not duplicated for same plugin name)
+        // 1 plugin name × 1 platform match × 2 formats = 2
+        assert_eq!(docker_count, 2, "Should not duplicate plugin names in URL generation");
+
+        // With "meta-" prefix, there should be two distinct names
+        let shorthand = GitHubShorthand::parse("user/meta-docker").unwrap();
+        let urls = installer.construct_github_urls(&shorthand, "linux-x64");
+
+        // Count URLs with exact platform for each plugin name variant
+        let meta_docker_count = urls.iter().filter(|u| u.contains("meta-docker-linux-x64")).count();
+        let docker_only_count = urls.iter().filter(|u| u.contains("/docker-linux-x64")).count();
+
+        // Both variants should exist: "meta-docker" and "docker" (without preceding "meta-")
+        assert_eq!(meta_docker_count, 2, "Should have meta-docker variant");
+        assert_eq!(docker_only_count, 2, "Should have docker variant without meta- prefix");
     }
 }
