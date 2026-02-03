@@ -5,7 +5,6 @@
 //! install plugins directly from the registry.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -78,6 +77,7 @@ pub struct PluginInfo {
 /// Where a plugin is installed
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "lowercase")]
+#[allow(dead_code)] // Bundled and ProjectLocal variants used by plugin discovery system
 pub enum PluginLocation {
     /// Installed in ~/.meta/plugins/
     Installed,
@@ -224,6 +224,7 @@ impl RegistryConfig {
 /// Plugin registry client
 pub struct RegistryClient {
     registries: Vec<String>,
+    #[allow(dead_code)] // Reserved for future debug output implementation
     verbose: bool,
 }
 
@@ -474,7 +475,9 @@ fn make_executable(_path: &Path) -> Result<()> {
 #[derive(Debug)]
 pub struct PluginInstaller {
     plugins_dir: PathBuf,
+    #[allow(dead_code)] // Reserved for future logging implementation
     verbose: bool,
+    #[allow(dead_code)] // Public API for querying installer scope (used in tests)
     scope: InstallScope,
 }
 
@@ -501,6 +504,7 @@ impl PluginInstaller {
     }
 
     /// Get the installation scope of this installer
+    #[allow(dead_code)] // Public API for querying installer scope (tested indirectly)
     pub fn scope(&self) -> &InstallScope {
         &self.scope
     }
@@ -962,25 +966,6 @@ impl PluginInstaller {
         }
     }
 
-    /// List installed plugins
-    pub fn list_installed(&self) -> Result<Vec<String>> {
-        let mut plugins = Vec::new();
-
-        if self.plugins_dir.exists() {
-            for entry in std::fs::read_dir(&self.plugins_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if is_plugin_binary(name) {
-                        plugins.push(name.to_string());
-                    }
-                }
-            }
-        }
-
-        Ok(plugins)
-    }
-
     /// List plugins with detailed information including manifest data
     pub fn list_plugins_detailed(&self) -> Result<Vec<PluginInfo>> {
         let mut plugins = Vec::new();
@@ -1126,44 +1111,6 @@ mod tests {
         assert_eq!(registries.len(), 2);
         assert_eq!(registries[0], "https://custom.registry.com");
         assert_eq!(registries[1], "https://another.registry.com");
-    }
-
-    #[test]
-    fn test_plugin_installer_list_installed_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let installer = PluginInstaller {
-            plugins_dir: dir.path().to_path_buf(),
-            verbose: false,
-            scope: InstallScope::Global,
-        };
-
-        let plugins = installer.list_installed().unwrap();
-        assert!(plugins.is_empty());
-    }
-
-    #[test]
-    fn test_plugin_installer_list_installed_with_plugins() {
-        let dir = tempfile::tempdir().unwrap();
-
-        // Create some fake plugin files
-        std::fs::write(dir.path().join("meta-docker"), "fake binary").unwrap();
-        std::fs::write(dir.path().join("meta-npm"), "fake binary").unwrap();
-        std::fs::write(dir.path().join("other-file"), "not a plugin").unwrap();
-        std::fs::write(dir.path().join("meta-old.dylib"), "dylib file").unwrap();
-
-        let installer = PluginInstaller {
-            plugins_dir: dir.path().to_path_buf(),
-            verbose: false,
-            scope: InstallScope::Global,
-        };
-
-        let plugins = installer.list_installed().unwrap();
-        assert_eq!(plugins.len(), 2);
-        assert!(plugins.contains(&"meta-docker".to_string()));
-        assert!(plugins.contains(&"meta-npm".to_string()));
-        // Should not include non-meta files or dylibs
-        assert!(!plugins.contains(&"other-file".to_string()));
-        assert!(!plugins.contains(&"meta-old.dylib".to_string()));
     }
 
     #[test]
