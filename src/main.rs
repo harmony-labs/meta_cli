@@ -942,7 +942,9 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
                         if !json {
                             println!(
                                 "Successfully installed {} v{} ({}) to {location}",
-                                metadata.name, metadata.version, installed.join(", ")
+                                metadata.name,
+                                metadata.version,
+                                installed.join(", ")
                             );
                         }
                     }
@@ -982,10 +984,16 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
                     println!("Installed plugins ({}):", plugins.len());
                 }
                 println!();
-                println!("{:<20} {:<15} {:<30} {:<15}", "NAME", "VERSION", "SOURCE", "LOCATION");
+                println!(
+                    "{:<20} {:<15} {:<30} {:<15}",
+                    "NAME", "VERSION", "SOURCE", "LOCATION"
+                );
                 println!("{}", "-".repeat(80));
                 for plugin in plugins {
-                    let name = plugin.name.strip_prefix(PLUGIN_PREFIX).unwrap_or(&plugin.name);
+                    let name = plugin
+                        .name
+                        .strip_prefix(PLUGIN_PREFIX)
+                        .unwrap_or(&plugin.name);
                     let version = plugin.version.as_deref().unwrap_or("-");
                     let source = plugin.source.as_deref().unwrap_or("-");
                     let location = match plugin.location {
@@ -993,7 +1001,10 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
                         registry::PluginLocation::Bundled => "bundled",
                         registry::PluginLocation::ProjectLocal => "project-local",
                     };
-                    println!("{:<20} {:<15} {:<30} {:<15}", name, version, source, location);
+                    println!(
+                        "{:<20} {:<15} {:<30} {:<15}",
+                        name, version, source, location
+                    );
                 }
             }
         }
@@ -1016,13 +1027,18 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
                     Some((current, latest)) => {
                         if check {
                             if !json {
-                                println!("Update available for {}: {} → {}", plugin_name, current, latest);
+                                println!(
+                                    "Update available for {}: {} → {}",
+                                    plugin_name, current, latest
+                                );
                             }
                         } else {
                             let updated = installer.update_plugin(&plugin_name)?;
                             if !json {
-                                println!("Successfully updated {} from {} to {} in {}",
-                                    updated, current, latest, location);
+                                println!(
+                                    "Successfully updated {} from {} to {} in {}",
+                                    updated, current, latest, location
+                                );
                             }
                         }
                     }
@@ -1039,7 +1055,10 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
                 let mut updated_count = 0;
 
                 for plugin in plugins {
-                    let name = plugin.name.strip_prefix(PLUGIN_PREFIX).unwrap_or(&plugin.name);
+                    let name = plugin
+                        .name
+                        .strip_prefix(PLUGIN_PREFIX)
+                        .unwrap_or(&plugin.name);
                     if let Ok(Some((current, latest))) = installer.check_update(name) {
                         updates_available.push((name.to_string(), current, latest));
                     }
@@ -1049,33 +1068,31 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
                     if !json {
                         println!("All plugins are up to date");
                     }
-                } else {
-                    if check {
-                        if !json {
-                            println!("Updates available:");
-                            for (name, current, latest) in &updates_available {
-                                println!("  {} {} → {}", name, current, latest);
-                            }
-                        }
-                    } else {
+                } else if check {
+                    if !json {
+                        println!("Updates available:");
                         for (name, current, latest) in &updates_available {
-                            match installer.update_plugin(name) {
-                                Ok(_) => {
-                                    if !json {
-                                        println!("Updated {} from {} to {}", name, current, latest);
-                                    }
-                                    updated_count += 1;
+                            println!("  {} {} → {}", name, current, latest);
+                        }
+                    }
+                } else {
+                    for (name, current, latest) in &updates_available {
+                        match installer.update_plugin(name) {
+                            Ok(_) => {
+                                if !json {
+                                    println!("Updated {} from {} to {}", name, current, latest);
                                 }
-                                Err(e) => {
-                                    if !json {
-                                        eprintln!("Failed to update {}: {}", name, e);
-                                    }
+                                updated_count += 1;
+                            }
+                            Err(e) => {
+                                if !json {
+                                    eprintln!("Failed to update {}: {}", name, e);
                                 }
                             }
                         }
-                        if !json {
-                            println!("\nUpdated {} plugin(s) in {}", updated_count, location);
-                        }
+                    }
+                    if !json {
+                        println!("\nUpdated {} plugin(s) in {}", updated_count, location);
                     }
                 }
             }

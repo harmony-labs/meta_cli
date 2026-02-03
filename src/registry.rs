@@ -12,7 +12,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// Default registry URL
-pub const DEFAULT_REGISTRY: &str = "https://raw.githubusercontent.com/harmony-labs/meta-plugins/main";
+pub const DEFAULT_REGISTRY: &str =
+    "https://raw.githubusercontent.com/harmony-labs/meta-plugins/main";
 
 /// Plugin name prefix (all plugins must start with this)
 pub const PLUGIN_PREFIX: &str = "meta-";
@@ -55,8 +56,7 @@ pub fn is_newer_version(current: &str, new: &str) -> bool {
 
 /// Check if a filename is a plugin binary (has prefix, no excluded extension)
 fn is_plugin_binary(name: &str) -> bool {
-    name.starts_with(PLUGIN_PREFIX)
-        && !EXCLUDED_EXTENSIONS.iter().any(|ext| name.ends_with(ext))
+    name.starts_with(PLUGIN_PREFIX) && !EXCLUDED_EXTENSIONS.iter().any(|ext| name.ends_with(ext))
 }
 
 /// Plugin manifest entry tracking installation metadata
@@ -125,16 +125,16 @@ impl PluginManifest {
         let content = std::fs::read_to_string(manifest_path)
             .with_context(|| format!("Failed to read manifest from {}", manifest_path.display()))?;
 
-        let manifest: Self = serde_json::from_str(&content)
-            .with_context(|| "Failed to parse plugin manifest")?;
+        let manifest: Self =
+            serde_json::from_str(&content).with_context(|| "Failed to parse plugin manifest")?;
 
         Ok(manifest)
     }
 
     /// Save manifest to file
     pub fn save(&self, manifest_path: &Path) -> Result<()> {
-        let json = serde_json::to_string_pretty(self)
-            .with_context(|| "Failed to serialize manifest")?;
+        let json =
+            serde_json::to_string_pretty(self).with_context(|| "Failed to serialize manifest")?;
 
         std::fs::write(manifest_path, json)
             .with_context(|| format!("Failed to write manifest to {}", manifest_path.display()))?;
@@ -385,7 +385,10 @@ impl RegistryClient {
         }
 
         let (user, repo) = (parts[0], parts[1]);
-        let api_url = format!("https://api.github.com/repos/{}/{}/releases/latest", user, repo);
+        let api_url = format!(
+            "https://api.github.com/repos/{}/{}/releases/latest",
+            user, repo
+        );
 
         debug!("Checking latest version: {}", api_url);
 
@@ -399,8 +402,8 @@ impl RegistryClient {
             .with_context(|| "Failed to read response body")?;
 
         // Parse JSON to extract tag_name
-        let json: serde_json::Value = serde_json::from_str(&body)
-            .with_context(|| "Failed to parse GitHub API response")?;
+        let json: serde_json::Value =
+            serde_json::from_str(&body).with_context(|| "Failed to parse GitHub API response")?;
 
         let tag_name = json["tag_name"]
             .as_str()
@@ -415,7 +418,10 @@ impl RegistryClient {
     pub fn current_platform() -> String {
         // Check for override via environment variable
         if let Ok(override_platform) = std::env::var("META_PLATFORM") {
-            debug!("Using platform override from META_PLATFORM: {}", override_platform);
+            debug!(
+                "Using platform override from META_PLATFORM: {}",
+                override_platform
+            );
             return override_platform;
         }
 
@@ -840,7 +846,11 @@ impl PluginInstaller {
             "Could not find release for {}/{}{}\nTried {} URL(s). Last error: {}",
             shorthand.user,
             shorthand.repo,
-            shorthand.version.as_ref().map(|v| format!("@{v}")).unwrap_or_default(),
+            shorthand
+                .version
+                .as_ref()
+                .map(|v| format!("@{v}"))
+                .unwrap_or_default(),
             urls.len(),
             last_error.unwrap()
         )
@@ -849,7 +859,10 @@ impl PluginInstaller {
     /// Construct possible GitHub release URLs for a shorthand
     fn construct_github_urls(&self, shorthand: &GitHubShorthand, platform: &str) -> Vec<String> {
         let mut urls = Vec::new();
-        let base = format!("https://github.com/{}/{}/releases", shorthand.user, shorthand.repo);
+        let base = format!(
+            "https://github.com/{}/{}/releases",
+            shorthand.user, shorthand.repo
+        );
 
         // Determine version component
         let version_paths = if let Some(version) = &shorthand.version {
@@ -1118,12 +1131,16 @@ impl PluginInstaller {
         let manifest = self.load_manifest()?;
         let plugin_name = ensure_plugin_prefix(plugin_name);
 
-        let entry = manifest.get_plugin(&plugin_name)
+        let entry = manifest
+            .get_plugin(&plugin_name)
             .ok_or_else(|| anyhow::anyhow!("Plugin {} not found in manifest", plugin_name))?;
 
         // Check if source is a GitHub shorthand
         if !entry.source.contains('/') {
-            debug!("Plugin {} source is not a GitHub shorthand, skipping update check", plugin_name);
+            debug!(
+                "Plugin {} source is not a GitHub shorthand, skipping update check",
+                plugin_name
+            );
             return Ok(None);
         }
 
@@ -1131,7 +1148,10 @@ impl PluginInstaller {
         let current_version = match &entry.version {
             Some(v) => v.clone(),
             None => {
-                debug!("Plugin {} has no version in manifest, cannot check for updates", plugin_name);
+                debug!(
+                    "Plugin {} has no version in manifest, cannot check for updates",
+                    plugin_name
+                );
                 return Ok(None);
             }
         };
@@ -1152,14 +1172,20 @@ impl PluginInstaller {
         let manifest = self.load_manifest()?;
         let plugin_name = ensure_plugin_prefix(plugin_name);
 
-        let entry = manifest.get_plugin(&plugin_name)
+        let entry = manifest
+            .get_plugin(&plugin_name)
             .ok_or_else(|| anyhow::anyhow!("Plugin {} not installed", plugin_name))?;
 
         // Parse source as GitHub shorthand
-        let shorthand = GitHubShorthand::parse(&entry.source)
-            .ok_or_else(|| anyhow::anyhow!("Cannot update plugin: source is not a GitHub shorthand"))?;
+        let shorthand = GitHubShorthand::parse(&entry.source).ok_or_else(|| {
+            anyhow::anyhow!("Cannot update plugin: source is not a GitHub shorthand")
+        })?;
 
-        info!("Updating {} from {} to latest", plugin_name, entry.version.as_deref().unwrap_or("unknown"));
+        info!(
+            "Updating {} from {} to latest",
+            plugin_name,
+            entry.version.as_deref().unwrap_or("unknown")
+        );
 
         // Uninstall current version
         self.uninstall(&plugin_name)?;
@@ -1606,23 +1632,38 @@ mod tests {
         let urls = installer.construct_github_urls(&shorthand, "linux-x64");
 
         // Count how many URLs contain "docker-linux-x64" (exact platform match)
-        let docker_count = urls.iter().filter(|u| u.contains("docker-linux-x64")).count();
+        let docker_count = urls
+            .iter()
+            .filter(|u| u.contains("docker-linux-x64"))
+            .count();
 
         // Should appear once per format (not duplicated for same plugin name)
         // 1 plugin name × 1 platform match × 2 formats = 2
-        assert_eq!(docker_count, 2, "Should not duplicate plugin names in URL generation");
+        assert_eq!(
+            docker_count, 2,
+            "Should not duplicate plugin names in URL generation"
+        );
 
         // With "meta-" prefix, there should be two distinct names
         let shorthand = GitHubShorthand::parse("user/meta-docker").unwrap();
         let urls = installer.construct_github_urls(&shorthand, "linux-x64");
 
         // Count URLs with exact platform for each plugin name variant
-        let meta_docker_count = urls.iter().filter(|u| u.contains("meta-docker-linux-x64")).count();
-        let docker_only_count = urls.iter().filter(|u| u.contains("/docker-linux-x64")).count();
+        let meta_docker_count = urls
+            .iter()
+            .filter(|u| u.contains("meta-docker-linux-x64"))
+            .count();
+        let docker_only_count = urls
+            .iter()
+            .filter(|u| u.contains("/docker-linux-x64"))
+            .count();
 
         // Both variants should exist: "meta-docker" and "docker" (without preceding "meta-")
         assert_eq!(meta_docker_count, 2, "Should have meta-docker variant");
-        assert_eq!(docker_only_count, 2, "Should have docker variant without meta- prefix");
+        assert_eq!(
+            docker_only_count, 2,
+            "Should have docker variant without meta- prefix"
+        );
     }
 
     #[test]
@@ -2009,7 +2050,10 @@ mod tests {
         std::env::set_current_dir(&original_dir).unwrap();
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Not in a meta workspace"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Not in a meta workspace"));
     }
 
     #[test]
