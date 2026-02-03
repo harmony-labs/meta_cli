@@ -132,6 +132,7 @@ pub fn find_meta_config(
         // Default: check all supported names
         vec![
             (".meta".to_string(), ConfigFormat::Json),
+            (".meta.json".to_string(), ConfigFormat::Json),
             (".meta.yaml".to_string(), ConfigFormat::Yaml),
             (".meta.yml".to_string(), ConfigFormat::Yaml),
         ]
@@ -141,7 +142,7 @@ pub fn find_meta_config(
     loop {
         for (name, format) in &candidates {
             let candidate = current_dir.join(name);
-            if candidate.exists() {
+            if candidate.exists() && candidate.is_file() {
                 return Some((candidate, format.clone()));
             }
         }
