@@ -657,12 +657,6 @@ impl PluginInstaller {
         )
     }
 
-    /// Returns error if not in a meta workspace with actionable guidance.
-    fn find_workspace_root() -> Result<PathBuf> {
-        let cwd = std::env::current_dir().context("Failed to get current directory")?;
-        Self::find_workspace_root_from(&cwd)
-    }
-
     /// Get the default plugins directory (~/.meta/plugins/)
     fn default_plugins_dir() -> Result<PathBuf> {
         meta_core::data_dir::data_subdir(GLOBAL_PLUGINS_DIR)
