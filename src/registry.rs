@@ -35,6 +35,24 @@ pub fn ensure_plugin_prefix(name: &str) -> String {
     }
 }
 
+/// Normalize version string by removing 'v' prefix
+fn normalize_version(version: &str) -> &str {
+    version.strip_prefix('v').unwrap_or(version)
+}
+
+/// Compare two version strings
+///
+/// Returns true if new_version is newer than current_version.
+/// Simple lexicographic comparison after normalizing (removing 'v' prefix).
+pub fn is_newer_version(current: &str, new: &str) -> bool {
+    let current = normalize_version(current);
+    let new = normalize_version(new);
+
+    // Simple string comparison works for most semver cases
+    // e.g., "1.0.0" < "1.1.0" < "2.0.0"
+    new > current
+}
+
 /// Check if a filename is a plugin binary (has prefix, no excluded extension)
 fn is_plugin_binary(name: &str) -> bool {
     name.starts_with(PLUGIN_PREFIX)
@@ -350,6 +368,45 @@ impl RegistryClient {
             .with_context(|| "Failed to read response body")?;
 
         serde_json::from_str(&body).with_context(|| "Failed to parse JSON response")
+    }
+
+    /// Check for the latest version of a plugin from GitHub
+    ///
+    /// Given a GitHub shorthand (user/repo), queries the GitHub API
+    /// for the latest release tag.
+    pub fn get_latest_version(shorthand: &str) -> Result<String> {
+        // Parse shorthand to extract user/repo
+        let parts: Vec<&str> = shorthand.split('@').collect();
+        let repo_path = parts[0];
+        let parts: Vec<&str> = repo_path.split('/').collect();
+
+        if parts.len() != 2 {
+            anyhow::bail!("Invalid GitHub shorthand: {}", shorthand);
+        }
+
+        let (user, repo) = (parts[0], parts[1]);
+        let api_url = format!("https://api.github.com/repos/{}/{}/releases/latest", user, repo);
+
+        debug!("Checking latest version: {}", api_url);
+
+        let response = ureq::get(&api_url)
+            .set("User-Agent", "meta-cli")
+            .call()
+            .with_context(|| format!("Failed to fetch latest release for {}/{}", user, repo))?;
+
+        let body = response
+            .into_string()
+            .with_context(|| "Failed to read response body")?;
+
+        // Parse JSON to extract tag_name
+        let json: serde_json::Value = serde_json::from_str(&body)
+            .with_context(|| "Failed to parse GitHub API response")?;
+
+        let tag_name = json["tag_name"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("No tag_name in release"))?;
+
+        Ok(tag_name.to_string())
     }
 
     /// Get the current platform identifier
@@ -1051,6 +1108,66 @@ impl PluginInstaller {
         } else {
             anyhow::bail!("Plugin {plugin_name} is not installed")
         }
+    }
+
+    /// Check for updates for a specific plugin
+    ///
+    /// Returns Some((current_version, latest_version)) if an update is available,
+    /// None if already up to date or if version info is unavailable.
+    pub fn check_update(&self, plugin_name: &str) -> Result<Option<(String, String)>> {
+        let manifest = self.load_manifest()?;
+        let plugin_name = ensure_plugin_prefix(plugin_name);
+
+        let entry = manifest.get_plugin(&plugin_name)
+            .ok_or_else(|| anyhow::anyhow!("Plugin {} not found in manifest", plugin_name))?;
+
+        // Check if source is a GitHub shorthand
+        if !entry.source.contains('/') {
+            debug!("Plugin {} source is not a GitHub shorthand, skipping update check", plugin_name);
+            return Ok(None);
+        }
+
+        // Get current version
+        let current_version = match &entry.version {
+            Some(v) => v.clone(),
+            None => {
+                debug!("Plugin {} has no version in manifest, cannot check for updates", plugin_name);
+                return Ok(None);
+            }
+        };
+
+        // Get latest version from GitHub
+        let latest_version = RegistryClient::get_latest_version(&entry.source)?;
+
+        // Compare versions
+        if is_newer_version(&current_version, &latest_version) {
+            Ok(Some((current_version, latest_version)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Update a plugin to the latest version
+    pub fn update_plugin(&self, plugin_name: &str) -> Result<String> {
+        let manifest = self.load_manifest()?;
+        let plugin_name = ensure_plugin_prefix(plugin_name);
+
+        let entry = manifest.get_plugin(&plugin_name)
+            .ok_or_else(|| anyhow::anyhow!("Plugin {} not installed", plugin_name))?;
+
+        // Parse source as GitHub shorthand
+        let shorthand = GitHubShorthand::parse(&entry.source)
+            .ok_or_else(|| anyhow::anyhow!("Cannot update plugin: source is not a GitHub shorthand"))?;
+
+        info!("Updating {} from {} to latest", plugin_name, entry.version.as_deref().unwrap_or("unknown"));
+
+        // Uninstall current version
+        self.uninstall(&plugin_name)?;
+
+        // Install latest version
+        let installed_name = self.install_from_github(&shorthand)?;
+
+        Ok(installed_name)
     }
 }
 
@@ -1916,5 +2033,45 @@ mod tests {
         let result = client.resolve_plugin_source("nonexistent-plugin-12345");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    // === M7: Plugin updates tests ===
+
+    #[test]
+    fn test_normalize_version_with_v_prefix() {
+        assert_eq!(normalize_version("v1.0.0"), "1.0.0");
+        assert_eq!(normalize_version("v2.3.4"), "2.3.4");
+    }
+
+    #[test]
+    fn test_normalize_version_without_v_prefix() {
+        assert_eq!(normalize_version("1.0.0"), "1.0.0");
+        assert_eq!(normalize_version("2.3.4"), "2.3.4");
+    }
+
+    #[test]
+    fn test_is_newer_version_basic() {
+        assert!(is_newer_version("1.0.0", "1.0.1"));
+        assert!(is_newer_version("1.0.0", "1.1.0"));
+        assert!(is_newer_version("1.0.0", "2.0.0"));
+    }
+
+    #[test]
+    fn test_is_newer_version_with_v_prefix() {
+        assert!(is_newer_version("v1.0.0", "v1.0.1"));
+        assert!(is_newer_version("1.0.0", "v1.0.1"));
+        assert!(is_newer_version("v1.0.0", "1.0.1"));
+    }
+
+    #[test]
+    fn test_is_newer_version_same() {
+        assert!(!is_newer_version("1.0.0", "1.0.0"));
+        assert!(!is_newer_version("v1.0.0", "v1.0.0"));
+    }
+
+    #[test]
+    fn test_is_newer_version_older() {
+        assert!(!is_newer_version("2.0.0", "1.0.0"));
+        assert!(!is_newer_version("1.1.0", "1.0.0"));
     }
 }

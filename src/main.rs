@@ -236,6 +236,17 @@ enum PluginCommands {
         #[arg(long)]
         local: bool,
     },
+    /// Update plugins to latest versions
+    Update {
+        /// Plugin name (updates all if not specified)
+        name: Option<String>,
+        /// Update from project-local plugins
+        #[arg(long)]
+        local: bool,
+        /// Check for updates without installing
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 // === Help Utilities ===
@@ -993,6 +1004,80 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
 
             if !json {
                 println!("Successfully uninstalled {name} from {location}");
+            }
+        }
+        PluginCommands::Update { name, local, check } => {
+            let installer = create_installer(local, verbose)?;
+            let location = format_plugin_location(local);
+
+            if let Some(plugin_name) = name {
+                // Update specific plugin
+                match installer.check_update(&plugin_name)? {
+                    Some((current, latest)) => {
+                        if check {
+                            if !json {
+                                println!("Update available for {}: {} → {}", plugin_name, current, latest);
+                            }
+                        } else {
+                            let updated = installer.update_plugin(&plugin_name)?;
+                            if !json {
+                                println!("Successfully updated {} from {} to {} in {}",
+                                    updated, current, latest, location);
+                            }
+                        }
+                    }
+                    None => {
+                        if !json {
+                            println!("{} is already up to date", plugin_name);
+                        }
+                    }
+                }
+            } else {
+                // Update all plugins
+                let plugins = installer.list_plugins_detailed()?;
+                let mut updates_available = Vec::new();
+                let mut updated_count = 0;
+
+                for plugin in plugins {
+                    let name = plugin.name.strip_prefix(PLUGIN_PREFIX).unwrap_or(&plugin.name);
+                    if let Ok(Some((current, latest))) = installer.check_update(name) {
+                        updates_available.push((name.to_string(), current, latest));
+                    }
+                }
+
+                if updates_available.is_empty() {
+                    if !json {
+                        println!("All plugins are up to date");
+                    }
+                } else {
+                    if check {
+                        if !json {
+                            println!("Updates available:");
+                            for (name, current, latest) in &updates_available {
+                                println!("  {} {} → {}", name, current, latest);
+                            }
+                        }
+                    } else {
+                        for (name, current, latest) in &updates_available {
+                            match installer.update_plugin(name) {
+                                Ok(_) => {
+                                    if !json {
+                                        println!("Updated {} from {} to {}", name, current, latest);
+                                    }
+                                    updated_count += 1;
+                                }
+                                Err(e) => {
+                                    if !json {
+                                        eprintln!("Failed to update {}: {}", name, e);
+                                    }
+                                }
+                            }
+                        }
+                        if !json {
+                            println!("\nUpdated {} plugin(s) in {}", updated_count, location);
+                        }
+                    }
+                }
             }
         }
     }
