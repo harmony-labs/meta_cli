@@ -1875,7 +1875,7 @@ mod tests {
         };
 
         // Create plugin file
-        std::fs::create_dir_all(&dir.path()).unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
         std::fs::write(dir.path().join("meta-test"), b"fake plugin").unwrap();
 
         // Create manifest
