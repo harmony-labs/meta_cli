@@ -85,6 +85,9 @@ pub struct MetaConfig {
     pub ignore: Vec<String>,
     #[serde(default)]
     pub defaults: MetaDefaults,
+    /// Custom directory for worktrees (overrides default .worktrees/)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktrees_dir: Option<String>,
 }
 
 /// Determines the format of a config file based on extension
@@ -101,11 +104,12 @@ pub enum ConfigFormat {
 pub fn find_meta_config_in(dir: &Path) -> Option<(PathBuf, ConfigFormat)> {
     for (name, format) in &[
         (".meta", ConfigFormat::Json),
+        (".meta.json", ConfigFormat::Json),
         (".meta.yaml", ConfigFormat::Yaml),
         (".meta.yml", ConfigFormat::Yaml),
     ] {
         let candidate = dir.join(name);
-        if candidate.exists() {
+        if candidate.exists() && candidate.is_file() {
             return Some((candidate, format.clone()));
         }
     }
