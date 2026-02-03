@@ -592,14 +592,21 @@ impl PluginInstaller {
     }
 
     /// Create a new plugin installer for project-local plugins
-    pub fn new_local(verbose: bool) -> Result<Self> {
-        let workspace_root = Self::find_workspace_root()?;
+    /// Create a local installer starting from the given directory.
+    /// Used for testing without changing current_dir.
+    fn new_local_from(start_dir: &Path, verbose: bool) -> Result<Self> {
+        let workspace_root = Self::find_workspace_root_from(start_dir)?;
         let plugins_dir = workspace_root.join(LOCAL_PLUGINS_DIR);
         Ok(Self {
             plugins_dir,
             verbose,
             scope: InstallScope::Local,
         })
+    }
+
+    pub fn new_local(verbose: bool) -> Result<Self> {
+        let cwd = std::env::current_dir().context("Failed to get current directory")?;
+        Self::new_local_from(&cwd, verbose)
     }
 
     /// Get the installation scope of this installer
@@ -617,13 +624,13 @@ impl PluginInstaller {
     /// Walks up the directory tree until one is found or filesystem root is reached.
     ///
     /// # Errors
-    /// Returns error if not in a meta workspace with actionable guidance.
-    fn find_workspace_root() -> Result<PathBuf> {
+    /// Find the workspace root starting from the given directory.
+    /// Walks up the directory tree looking for .meta/ directory or legacy config files.
+    fn find_workspace_root_from(start_dir: &Path) -> Result<PathBuf> {
         use crate::config::find_meta_config_in;
-        let cwd = std::env::current_dir().context("Failed to get current directory")?;
 
         // Walk up the directory tree once, checking both .meta/ and config files
-        let mut current = cwd.as_path();
+        let mut current = start_dir;
         loop {
             // Check for .meta/ directory (new format)
             let meta_dir = current.join(".meta");
@@ -648,6 +655,12 @@ impl PluginInstaller {
              Expected to find .meta/ directory or .meta.yaml config file.\n\
              Run 'meta init' to create a new workspace, or cd to an existing workspace."
         )
+    }
+
+    /// Returns error if not in a meta workspace with actionable guidance.
+    fn find_workspace_root() -> Result<PathBuf> {
+        let cwd = std::env::current_dir().context("Failed to get current directory")?;
+        Self::find_workspace_root_from(&cwd)
     }
 
     /// Get the default plugins directory (~/.meta/plugins/)
@@ -1907,19 +1920,12 @@ mod tests {
         let meta_dir = temp.path().join(".meta");
         std::fs::create_dir(&meta_dir).unwrap();
 
-        // Change to subdirectory to test walking up
+        // Create subdirectory to test walking up
         let subdir = temp.path().join("sub").join("dir");
         std::fs::create_dir_all(&subdir).unwrap();
 
-        // Save original directory
-        let original_dir = std::env::current_dir().unwrap();
-
-        // Change to subdirectory and test
-        std::env::set_current_dir(&subdir).unwrap();
-        let result = PluginInstaller::find_workspace_root();
-
-        // Restore original directory
-        std::env::set_current_dir(&original_dir).unwrap();
+        // Test from subdirectory - should walk up and find .meta/
+        let result = PluginInstaller::find_workspace_root_from(&subdir);
 
         assert!(result.is_ok());
         // Canonicalize paths for comparison (handles /var vs /private/var on macOS)
@@ -1934,12 +1940,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join(".meta.yaml"), "projects: {}").unwrap();
 
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(temp.path()).unwrap();
-
-        let result = PluginInstaller::find_workspace_root();
-
-        std::env::set_current_dir(&original_dir).unwrap();
+        let result = PluginInstaller::find_workspace_root_from(temp.path());
 
         assert!(result.is_ok());
         // Canonicalize paths for comparison (handles /var vs /private/var on macOS)
@@ -1954,12 +1955,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join(".meta"), r#"{"projects":{}}"#).unwrap();
 
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(temp.path()).unwrap();
-
-        let result = PluginInstaller::find_workspace_root();
-
-        std::env::set_current_dir(&original_dir).unwrap();
+        let result = PluginInstaller::find_workspace_root_from(temp.path());
 
         assert!(result.is_ok());
         // Canonicalize paths for comparison (handles /var vs /private/var on macOS)
@@ -1973,12 +1969,7 @@ mod tests {
     fn test_find_workspace_root_fails_outside_workspace() {
         let temp = tempfile::tempdir().unwrap();
 
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(temp.path()).unwrap();
-
-        let result = PluginInstaller::find_workspace_root();
-
-        std::env::set_current_dir(&original_dir).unwrap();
+        let result = PluginInstaller::find_workspace_root_from(temp.path());
 
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -1995,12 +1986,7 @@ mod tests {
         std::fs::create_dir(&meta_dir).unwrap();
         std::fs::write(temp.path().join(".meta.yaml"), "projects: {}").unwrap();
 
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(temp.path()).unwrap();
-
-        let result = PluginInstaller::find_workspace_root();
-
-        std::env::set_current_dir(&original_dir).unwrap();
+        let result = PluginInstaller::find_workspace_root_from(temp.path());
 
         // Should successfully find the workspace root
         assert!(result.is_ok());
@@ -2021,12 +2007,7 @@ mod tests {
         let plugins_dir = temp.path().join(LOCAL_PLUGINS_DIR);
         std::fs::create_dir_all(&plugins_dir).unwrap();
 
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(temp.path()).unwrap();
-
-        let result = PluginInstaller::new_local(false);
-
-        std::env::set_current_dir(&original_dir).unwrap();
+        let result = PluginInstaller::new_local_from(temp.path(), false);
 
         assert!(result.is_ok());
         let installer = result.unwrap();
@@ -2042,12 +2023,7 @@ mod tests {
     fn test_new_local_fails_outside_workspace() {
         let temp = tempfile::tempdir().unwrap();
 
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(temp.path()).unwrap();
-
-        let result = PluginInstaller::new_local(false);
-
-        std::env::set_current_dir(&original_dir).unwrap();
+        let result = PluginInstaller::new_local_from(temp.path(), false);
 
         assert!(result.is_err());
         assert!(result
