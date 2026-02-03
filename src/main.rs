@@ -907,14 +907,34 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
             } else {
                 // Registry-based install
                 let client = RegistryClient::new(verbose)?;
-                let metadata = client.fetch_plugin_metadata(&name)?;
-                let installed = installer.install(&metadata)?;
 
-                if !json {
-                    println!(
-                        "Successfully installed {} v{} ({}) to {location}",
-                        metadata.name, metadata.version, installed.join(", ")
-                    );
+                // Try simple registry format first (M6: plugins/{name} contains GitHub shorthand)
+                match client.resolve_plugin_source(&name) {
+                    Ok(source) => {
+                        // Got GitHub shorthand from registry, use GitHub install flow
+                        if let Some(shorthand) = GitHubShorthand::parse(&source) {
+                            let plugin_name = installer.install_from_github(&shorthand)?;
+                            if !json {
+                                println!(
+                                    "Successfully installed {plugin_name} from {source} to {location}"
+                                );
+                            }
+                        } else {
+                            anyhow::bail!("Invalid plugin source in registry: {}", source);
+                        }
+                    }
+                    Err(_) => {
+                        // Fall back to complex registry format (plugins/{name}/plugin.json)
+                        let metadata = client.fetch_plugin_metadata(&name)?;
+                        let installed = installer.install(&metadata)?;
+
+                        if !json {
+                            println!(
+                                "Successfully installed {} v{} ({}) to {location}",
+                                metadata.name, metadata.version, installed.join(", ")
+                            );
+                        }
+                    }
                 }
             }
         }

@@ -12,7 +12,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// Default registry URL
-pub const DEFAULT_REGISTRY: &str = "https://raw.githubusercontent.com/anthropics/meta-plugins/main";
+pub const DEFAULT_REGISTRY: &str = "https://raw.githubusercontent.com/harmony-labs/meta-plugins/main";
 
 /// Plugin name prefix (all plugins must start with this)
 pub const PLUGIN_PREFIX: &str = "meta-";
@@ -269,7 +269,43 @@ impl RegistryClient {
         Ok(combined_index)
     }
 
-    /// Fetch plugin metadata
+    /// Resolve plugin source (GitHub shorthand) from registry
+    ///
+    /// This is the simplified M6 registry format where `plugins/{name}` contains
+    /// a plain text GitHub shorthand like "user/repo" or "user/repo@v1.0.0".
+    pub fn resolve_plugin_source(&self, name: &str) -> Result<String> {
+        for registry_url in &self.registries {
+            let plugin_url = format!("{registry_url}/plugins/{name}");
+            debug!("Resolving plugin source from: {}", plugin_url);
+
+            match ureq::get(&plugin_url).call() {
+                Ok(response) => {
+                    let source = response
+                        .into_string()
+                        .with_context(|| "Failed to read response body")?;
+                    let source = source.trim().to_string();
+
+                    if source.is_empty() {
+                        continue;
+                    }
+
+                    debug!("Resolved {} -> {}", name, source);
+                    return Ok(source);
+                }
+                Err(e) => {
+                    debug!("Plugin {} not found in {}: {}", name, registry_url, e);
+                    continue;
+                }
+            }
+        }
+
+        anyhow::bail!("Plugin '{name}' not found in any registry")
+    }
+
+    /// Fetch plugin metadata (complex registry format)
+    ///
+    /// This is the original registry format with full metadata in JSON.
+    /// Falls back to this when simple source resolution fails.
     pub fn fetch_plugin_metadata(&self, name: &str) -> Result<PluginMetadata> {
         for registry_url in &self.registries {
             let plugin_url = format!("{registry_url}/plugins/{name}/plugin.json");
@@ -1864,5 +1900,21 @@ mod tests {
         // Verify constants are accessible and have expected values
         assert_eq!(LOCAL_PLUGINS_DIR, ".meta/plugins");
         assert_eq!(GLOBAL_PLUGINS_DIR, "plugins");
+    }
+
+    // === M6: Simple registry tests ===
+
+    #[test]
+    fn test_default_registry_points_to_harmony_labs() {
+        assert!(DEFAULT_REGISTRY.contains("harmony-labs"));
+        assert!(DEFAULT_REGISTRY.contains("meta-plugins"));
+    }
+
+    #[test]
+    fn test_resolve_plugin_source_invalid_name() {
+        let client = RegistryClient::new(false).unwrap();
+        let result = client.resolve_plugin_source("nonexistent-plugin-12345");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
     }
 }
