@@ -489,6 +489,27 @@ impl SubprocessPluginManager {
         plugins
     }
 
+    /// Get detailed list of plugins including path
+    pub fn list_plugins_with_paths(&self) -> Vec<(&str, &str, &str, &std::path::Path)> {
+        let mut plugins: Vec<_> = self
+            .plugins
+            .values()
+            .map(|p| {
+                (
+                    p.info.name.as_str(),
+                    p.info.version.as_str(),
+                    p.info
+                        .description
+                        .as_deref()
+                        .unwrap_or("No description available"),
+                    p.path.as_path(),
+                )
+            })
+            .collect();
+        plugins.sort_by(|a, b| a.0.cmp(b.0));
+        plugins
+    }
+
     /// Returns all top-level (promoted) commands from plugins.
     ///
     /// A "promoted" command is one that doesn't start with the plugin's name,
@@ -526,9 +547,21 @@ impl SubprocessPluginManager {
         promoted
     }
 
-    /// Get help text for a specific plugin
-    pub fn get_plugin_help(&self, plugin_name: &str) -> Option<String> {
-        let plugin = self.plugins.get(plugin_name)?;
+    /// Get help text for a specific plugin or command.
+    ///
+    /// First tries to find a plugin by name (e.g., "git" for `meta git --help`).
+    /// If not found, searches for a plugin that handles this command
+    /// (e.g., "worktree" is handled by the "git" plugin).
+    pub fn get_plugin_help(&self, plugin_or_cmd: &str) -> Option<String> {
+        // First, try direct plugin name lookup
+        let plugin = self.plugins.get(plugin_or_cmd).or_else(|| {
+            // If not found by name, find which plugin handles this command
+            self.plugins.values().find(|p| {
+                p.info.commands.iter().any(|cmd| {
+                    cmd == plugin_or_cmd || cmd.starts_with(&format!("{plugin_or_cmd} "))
+                })
+            })
+        })?;
 
         // Try to get help by executing plugin with --help
         let output = Command::new(&plugin.path)
@@ -781,7 +814,7 @@ mod tests {
     #[test]
     fn test_generate_fallback_help_with_structured_help() {
         let manager = SubprocessPluginManager::new();
-        let mut commands = std::collections::HashMap::new();
+        let mut commands = indexmap::IndexMap::new();
         commands.insert("build".to_string(), "Build the project".to_string());
         commands.insert("test".to_string(), "Run tests".to_string());
 
@@ -880,7 +913,7 @@ mod tests {
 
     #[test]
     fn test_plugin_help_serialization() {
-        let mut commands = std::collections::HashMap::new();
+        let mut commands = indexmap::IndexMap::new();
         commands.insert("cmd1".to_string(), "Description 1".to_string());
 
         let help = PluginHelp {

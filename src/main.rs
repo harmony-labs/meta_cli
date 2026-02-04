@@ -302,6 +302,17 @@ fn write_help_with_plugin_commands(
         commands.push((name, desc, Some(plugin)));
     }
 
+    // Plugin commands (e.g., "git", "project", "rust")
+    // These are invoked as `meta <plugin> <subcommand>`
+    // Mark them with plugin name and version suffix
+    for (name, version, description) in plugins.list_plugins() {
+        commands.push((
+            name.to_string(),
+            description.to_string(),
+            Some(format!("plugin: {name} v{version}")),
+        ));
+    }
+
     // Sort alphabetically
     commands.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -376,27 +387,6 @@ fn write_help_with_plugin_commands(
     writeln!(w, "  {:<38}  Print help", "-h, --help")?;
     writeln!(w, "  {:<38}  Print version", "-V, --version")?;
 
-    // Installed plugins section
-    write_installed_plugins(plugins, w)?;
-
-    Ok(())
-}
-
-/// Write list of installed plugins to a writer.
-fn write_installed_plugins(
-    plugins: &SubprocessPluginManager,
-    w: &mut dyn Write,
-) -> std::io::Result<()> {
-    let plugin_list = plugins.list_plugins();
-    if !plugin_list.is_empty() {
-        writeln!(w)?;
-        writeln!(w, "INSTALLED PLUGINS:")?;
-        for (name, version, description) in plugin_list {
-            writeln!(w, "    {name:<12} v{version:<8} {description}")?;
-        }
-        writeln!(w)?;
-        writeln!(w, "Run 'meta <plugin> --help' for plugin-specific help.")?;
-    }
     Ok(())
 }
 
@@ -457,8 +447,29 @@ fn main() -> Result<()> {
             };
             init::handle_init_command(cmd, cli.verbose)
         }
-        Some(Commands::Plugin(args)) => handle_plugin_command(args.command, cli.verbose, cli.json),
+        Some(Commands::Plugin(args)) => {
+            handle_plugin_command(args.command, cli.verbose, cli.json, &subprocess_plugins)
+        }
         Some(Commands::Exec(args)) => {
+            // Handle help flag for exec command specifically
+            if cli.help {
+                println!("meta exec - Run any command across all repos");
+                println!();
+                println!("Usage: meta exec [OPTIONS] -- <COMMAND>...");
+                println!();
+                println!("Arguments:");
+                println!("  <COMMAND>...    Command and arguments to run");
+                println!();
+                println!("The command runs in each project directory defined in .meta.");
+                println!("Use this for any command not explicitly handled by a plugin.");
+                println!();
+                println!("Examples:");
+                println!("  meta exec -- npm install");
+                println!("  meta exec -- git fetch --all");
+                println!("  meta exec -- make clean");
+                println!("  meta exec --include api,web -- docker-compose up -d");
+                std::process::exit(0);
+            }
             handle_command_dispatch(args.command, &cli, &subprocess_plugins, true)
         }
         Some(Commands::External(args)) => {
@@ -468,11 +479,26 @@ fn main() -> Result<()> {
             let mut args = args;
             extract_global_flags(&mut args, &mut cli);
 
-            // Check for plugin help or bare plugin command first
+            // Check for plugin help request (explicit --help flag)
+            // For bare commands like "worktree", let them pass through to plugin execution
+            // so the plugin can show command-specific help (e.g., worktree options)
             if let Some(first) = args.first() {
                 let wants_help = args.iter().any(|a| a == "--help" || a == "-h");
                 let is_bare = args.len() == 1;
-                if wants_help || is_bare {
+
+                // Only intercept with get_plugin_help for:
+                // 1. Explicit --help requests (e.g., "meta git --help")
+                // 2. Bare plugin names (e.g., "meta git"), NOT bare promoted commands
+                let promoted_commands: Vec<String> = subprocess_plugins
+                    .get_promoted_commands()
+                    .iter()
+                    .map(|(name, _, _)| name.clone())
+                    .collect();
+                let is_promoted = promoted_commands.contains(&first.to_string());
+
+                // For promoted commands (like "worktree"), let them execute normally
+                // so the plugin can display command-specific help
+                if wants_help || (is_bare && !is_promoted) {
                     if let Some(help_text) = subprocess_plugins.get_plugin_help(first) {
                         println!("{help_text}");
                         return Ok(());
@@ -498,6 +524,7 @@ fn handle_command_dispatch(
 ) -> Result<()> {
     if command_args.is_empty() {
         if is_explicit_exec {
+            // Show usage error (help is handled at the caller level via cli.help)
             eprintln!("Usage: meta exec <command> [args...]");
         } else {
             print_help_with_plugins(plugins, true);
@@ -865,7 +892,12 @@ fn format_plugin_location(local: bool) -> &'static str {
 }
 
 /// Handle plugin management subcommands with typed args.
-fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: bool) -> Result<()> {
+fn handle_plugin_command(
+    command: Option<PluginCommands>,
+    verbose: bool,
+    json: bool,
+    subprocess_plugins: &SubprocessPluginManager,
+) -> Result<()> {
     use registry::{PluginInstaller, RegistryClient, PLUGIN_PREFIX};
 
     let command = match command {
@@ -957,9 +989,9 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
             }
         }
         PluginCommands::List { local } => {
-            let plugins = if local {
-                // List only project-local plugins
-                match PluginInstaller::new_local(verbose) {
+            if local {
+                // For --local, use the registry-based listing for plugin management
+                let plugins = match PluginInstaller::new_local(verbose) {
                     Ok(installer) => installer.list_plugins_detailed()?,
                     Err(_) => {
                         if !json {
@@ -967,49 +999,56 @@ fn handle_plugin_command(command: Option<PluginCommands>, verbose: bool, json: b
                         }
                         return Ok(());
                     }
-                }
-            } else {
-                // List all plugins (global + local via discovery)
-                let installer = PluginInstaller::new(verbose)?;
-                installer.list_plugins_detailed()?
-            };
+                };
 
-            if json {
-                println!("{}", serde_json::to_string_pretty(&plugins)?);
-            } else if plugins.is_empty() {
-                if local {
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&plugins)?);
+                } else if plugins.is_empty() {
                     println!("No project-local plugins installed");
                 } else {
-                    println!("No plugins installed");
+                    println!("Project-local plugins ({}):", plugins.len());
+                    println!();
+                    println!("{:<12} {:<12} {}", "NAME", "VERSION", "PATH");
+                    println!("{}", "-".repeat(70));
+                    for plugin in plugins {
+                        let name = plugin
+                            .name
+                            .strip_prefix(PLUGIN_PREFIX)
+                            .unwrap_or(&plugin.name);
+                        let version = plugin.version.as_deref().unwrap_or("-");
+                        // For local plugins, show the path in the local plugins dir
+                        let cwd = std::env::current_dir()?;
+                        let path = cwd.join(".meta/plugins").join(&plugin.name);
+                        println!("{:<12} {:<12} {}", name, version, path.display());
+                    }
                 }
             } else {
-                if local {
-                    println!("Project-local plugins ({}):", plugins.len());
+                // Use discovered plugins from subprocess plugin manager
+                let plugins = subprocess_plugins.list_plugins_with_paths();
+
+                if json {
+                    let json_plugins: Vec<_> = plugins
+                        .iter()
+                        .map(|(name, version, desc, path)| {
+                            serde_json::json!({
+                                "name": name,
+                                "version": version,
+                                "description": desc,
+                                "path": path.display().to_string()
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&json_plugins)?);
+                } else if plugins.is_empty() {
+                    println!("No plugins installed");
                 } else {
                     println!("Installed plugins ({}):", plugins.len());
-                }
-                println!();
-                println!(
-                    "{:<20} {:<15} {:<30} {:<15}",
-                    "NAME", "VERSION", "SOURCE", "LOCATION"
-                );
-                println!("{}", "-".repeat(80));
-                for plugin in plugins {
-                    let name = plugin
-                        .name
-                        .strip_prefix(PLUGIN_PREFIX)
-                        .unwrap_or(&plugin.name);
-                    let version = plugin.version.as_deref().unwrap_or("-");
-                    let source = plugin.source.as_deref().unwrap_or("-");
-                    let location = match plugin.location {
-                        registry::PluginLocation::Installed => "installed",
-                        registry::PluginLocation::Bundled => "bundled",
-                        registry::PluginLocation::ProjectLocal => "project-local",
-                    };
-                    println!(
-                        "{:<20} {:<15} {:<30} {:<15}",
-                        name, version, source, location
-                    );
+                    println!();
+                    println!("{:<12} {:<12} {}", "NAME", "VERSION", "PATH");
+                    println!("{}", "-".repeat(70));
+                    for (name, version, _, path) in &plugins {
+                        println!("{:<12} {:<12} {}", name, version, path.display());
+                    }
                 }
             }
         }
