@@ -1008,7 +1008,7 @@ fn handle_plugin_command(
                 } else {
                     println!("Project-local plugins ({}):", plugins.len());
                     println!();
-                    println!("{:<12} {:<12} {}", "NAME", "VERSION", "PATH");
+                    println!("{:<12} {:<12} PATH", "NAME", "VERSION");
                     println!("{}", "-".repeat(70));
                     for plugin in plugins {
                         let name = plugin
@@ -1044,7 +1044,7 @@ fn handle_plugin_command(
                 } else {
                     println!("Installed plugins ({}):", plugins.len());
                     println!();
-                    println!("{:<12} {:<12} {}", "NAME", "VERSION", "PATH");
+                    println!("{:<12} {:<12} PATH", "NAME", "VERSION");
                     println!("{}", "-".repeat(70));
                     for (name, version, _, path) in &plugins {
                         println!("{:<12} {:<12} {}", name, version, path.display());
