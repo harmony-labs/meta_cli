@@ -195,9 +195,7 @@ pub fn parse_meta_config(meta_path: &Path) -> anyhow::Result<(Vec<ProjectInfo>, 
         .map(|(name, entry)| {
             let (repo, path, tags, provides, depends_on) = match entry {
                 // Simple string -> git URL
-                ProjectEntry::Simple(url) => {
-                    (Some(url), name.clone(), vec![], vec![], vec![])
-                }
+                ProjectEntry::Simple(url) => (Some(url), name.clone(), vec![], vec![], vec![]),
                 // Extended object -> repo with additional fields
                 // meta: true indicates this project is also a meta-repo (has its own .meta)
                 ProjectEntry::Extended {
@@ -732,7 +730,10 @@ mod tests {
         assert_eq!(projects.len(), 2);
 
         let vendor = projects.iter().find(|p| p.name == "vendor").unwrap();
-        assert_eq!(vendor.repo.as_ref().unwrap(), "git@github.com:org/vendor.git");
+        assert_eq!(
+            vendor.repo.as_ref().unwrap(),
+            "git@github.com:org/vendor.git"
+        );
         assert_eq!(vendor.path, "vendor");
 
         let core = projects.iter().find(|p| p.name == "core").unwrap();
@@ -753,7 +754,10 @@ mod tests {
         assert_eq!(projects.len(), 2);
 
         let vendor = projects.iter().find(|p| p.name == "vendor").unwrap();
-        assert_eq!(vendor.repo.as_ref().unwrap(), "git@github.com:org/vendor.git");
+        assert_eq!(
+            vendor.repo.as_ref().unwrap(),
+            "git@github.com:org/vendor.git"
+        );
     }
 
     #[test]
@@ -777,7 +781,10 @@ mod tests {
         assert_eq!(projects.len(), 1);
 
         let vendor = &projects[0];
-        assert_eq!(vendor.repo.as_ref().unwrap(), "git@github.com:org/vendor.git");
+        assert_eq!(
+            vendor.repo.as_ref().unwrap(),
+            "git@github.com:org/vendor.git"
+        );
         assert_eq!(vendor.name, "vendor");
         assert_eq!(vendor.path, "third_party/vendor");
     }
@@ -831,7 +838,10 @@ mod tests {
 
         let vendor_node = &tree[0];
         assert_eq!(vendor_node.info.name, "vendor");
-        assert_eq!(vendor_node.info.repo.as_ref().unwrap(), "git@github.com:org/vendor.git");
+        assert_eq!(
+            vendor_node.info.repo.as_ref().unwrap(),
+            "git@github.com:org/vendor.git"
+        );
         assert!(vendor_node.is_meta);
         assert_eq!(vendor_node.children.len(), 1);
 
@@ -957,7 +967,10 @@ mod tests {
 
         // Check from sub-vendor's perspective (should not be orphan - tracked by vendor)
         let result = check_orphan_status(&sub_vendor);
-        assert!(result.is_none(), "sub-vendor should not be orphan when tracked by vendor");
+        assert!(
+            result.is_none(),
+            "sub-vendor should not be orphan when tracked by vendor"
+        );
     }
 
     #[test]
@@ -985,15 +998,14 @@ mod tests {
         std::fs::create_dir(vendor.join("lib")).unwrap();
 
         // Orphan has its own .meta
-        std::fs::write(
-            orphan_dir.join(".meta"),
-            r#"{"projects": {}}"#,
-        )
-        .unwrap();
+        std::fs::write(orphan_dir.join(".meta"), r#"{"projects": {}}"#).unwrap();
 
         // Check from orphan's perspective
         let result = check_orphan_status(&orphan_dir);
-        assert!(result.is_some(), "orphan-project should be orphan when not tracked by vendor");
+        assert!(
+            result.is_some(),
+            "orphan-project should be orphan when not tracked by vendor"
+        );
 
         let warning = result.unwrap();
         assert_eq!(warning.suggested_key, "orphan-project");

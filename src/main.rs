@@ -1308,10 +1308,7 @@ mod tests {
         // Simple format: path defaults to project name
         let repo1 = projects.iter().find(|p| p.name == "repo1").unwrap();
         assert_eq!(repo1.path, "repo1");
-        assert_eq!(
-            repo1.repo.as_ref().unwrap(),
-            "git@github.com:org/repo1.git"
-        );
+        assert_eq!(repo1.repo.as_ref().unwrap(), "git@github.com:org/repo1.git");
         assert!(repo1.tags.is_empty());
 
         assert_eq!(
