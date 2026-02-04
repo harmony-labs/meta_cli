@@ -393,7 +393,7 @@ impl SubprocessPluginManager {
                 parallel: plan.parallel.unwrap_or(options.parallel),
                 dry_run: options.dry_run,
                 json_output: options.json_output,
-                spawn_stagger_ms: 0,
+                spawn_stagger_ms: plan.spawn_stagger_ms.unwrap_or(0),
                 env: None,
                 max_parallel: plan.max_parallel,
                 root_dir,
