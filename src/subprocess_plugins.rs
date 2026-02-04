@@ -597,7 +597,16 @@ impl SubprocessPluginManager {
             let usage = &plugin_help.usage;
             help.push_str(&format!("    {usage}\n\n"));
 
-            if !plugin_help.commands.is_empty() {
+            // Use command_sections if present, otherwise fall back to flat commands
+            if !plugin_help.command_sections.is_empty() {
+                for (section_title, commands) in &plugin_help.command_sections {
+                    help.push_str(&format!("{section_title}:\n"));
+                    for (cmd, desc) in commands {
+                        help.push_str(&format!("    {cmd:<16} {desc}\n"));
+                    }
+                    help.push('\n');
+                }
+            } else if !plugin_help.commands.is_empty() {
                 help.push_str("COMMANDS:\n");
                 let mut cmds: Vec<_> = plugin_help.commands.iter().collect();
                 cmds.sort_by(|a, b| a.0.cmp(b.0));
@@ -828,6 +837,7 @@ mod tests {
                 help: Some(PluginHelp {
                     usage: "meta rust <command> [args...]".to_string(),
                     commands,
+                    command_sections: indexmap::IndexMap::new(),
                     examples: vec![
                         "meta rust build".to_string(),
                         "meta rust test --all".to_string(),
@@ -919,6 +929,7 @@ mod tests {
         let help = PluginHelp {
             usage: "test usage".to_string(),
             commands,
+            command_sections: indexmap::IndexMap::new(),
             examples: vec!["example 1".to_string()],
             note: Some("a note".to_string()),
         };
