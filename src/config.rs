@@ -9,15 +9,17 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Represents a project entry in the .meta config.
-/// Can be either a simple git URL string or an extended object with optional fields.
+/// Can be either a simple git URL string or an extended object with additional fields.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum ProjectEntry {
     /// Simple format: just a git URL string
     Simple(String),
-    /// Extended format: object with repo, optional path, tags, and dependency info
+    /// Extended format: object with repo, path, tags, and dependency info
     Extended {
-        repo: String,
+        /// Git remote URL. Required for all projects.
+        #[serde(default)]
+        repo: Option<String>,
         #[serde(default)]
         path: Option<String>,
         #[serde(default)]
@@ -26,6 +28,9 @@ pub enum ProjectEntry {
         provides: Vec<String>,
         #[serde(default)]
         depends_on: Vec<String>,
+        /// If true, this directory contains a nested .meta config
+        #[serde(default)]
+        meta: bool,
     },
 }
 
@@ -34,7 +39,9 @@ pub enum ProjectEntry {
 pub struct ProjectInfo {
     pub name: String,
     pub path: String,
-    pub repo: String,
+    /// Git remote URL. Should be present for all normal projects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     pub tags: Vec<String>,
     /// What this project provides (e.g., APIs, libraries)
     #[serde(default)]
@@ -55,6 +62,11 @@ impl ProjectInfo {
             provides: self.provides.clone(),
             depends_on: self.depends_on.clone(),
         }
+    }
+
+    /// Returns true if this project has no git repo URL (cannot be cloned)
+    pub fn has_no_repo(&self) -> bool {
+        self.repo.is_none()
     }
 }
 
@@ -79,6 +91,9 @@ impl Default for MetaDefaults {
 /// The meta configuration file structure
 #[derive(Debug, Deserialize, Default)]
 pub struct MetaConfig {
+    /// Projects in this meta repo. Values can be:
+    /// - A git URL string: `"project": "git@github.com:org/repo.git"`
+    /// - An extended object: `"project": { "repo": "...", "path": "...", "meta": true }`
     #[serde(default)]
     pub projects: HashMap<String, ProjectEntry>,
     #[serde(default)]
@@ -91,7 +106,7 @@ pub struct MetaConfig {
 }
 
 /// Determines the format of a config file based on extension
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum ConfigFormat {
     Json,
     Yaml,
@@ -174,18 +189,24 @@ pub fn parse_meta_config(meta_path: &Path) -> anyhow::Result<(Vec<ProjectInfo>, 
     };
 
     // Convert project entries to normalized ProjectInfo
-    let projects: Vec<ProjectInfo> = config
+    let mut projects: Vec<ProjectInfo> = config
         .projects
         .into_iter()
         .map(|(name, entry)| {
             let (repo, path, tags, provides, depends_on) = match entry {
-                ProjectEntry::Simple(repo) => (repo, name.clone(), vec![], vec![], vec![]),
+                // Simple string -> git URL
+                ProjectEntry::Simple(url) => {
+                    (Some(url), name.clone(), vec![], vec![], vec![])
+                }
+                // Extended object -> repo with additional fields
+                // meta: true indicates this project is also a meta-repo (has its own .meta)
                 ProjectEntry::Extended {
                     repo,
                     path,
                     tags,
                     provides,
                     depends_on,
+                    meta: _,
                 } => {
                     let resolved_path = path.unwrap_or_else(|| name.clone());
                     (repo, resolved_path, tags, provides, depends_on)
@@ -203,7 +224,6 @@ pub fn parse_meta_config(meta_path: &Path) -> anyhow::Result<(Vec<ProjectInfo>, 
         .collect();
 
     // Sort projects alphabetically by name for deterministic order
-    let mut projects = projects;
     projects.sort_by(|a, b| a.name.cmp(&b.name));
 
     Ok((projects, config.ignore))
@@ -288,6 +308,94 @@ fn flatten_inner(nodes: &[MetaTreeNode], prefix: &str, paths: &mut Vec<String>) 
         };
         paths.push(full_path.clone());
         flatten_inner(&node.children, &full_path, paths);
+    }
+}
+
+/// Build a map from full path to (resolved path, ProjectInfo) for nested lookups.
+///
+/// This is useful for looking up projects by their full nested path
+/// (e.g., "vendor/nested-lib" -> resolved filesystem path and project info).
+pub fn build_project_map(
+    nodes: &[MetaTreeNode],
+    base_dir: &Path,
+    prefix: &str,
+) -> std::collections::HashMap<String, (PathBuf, ProjectInfo)> {
+    let mut map = std::collections::HashMap::new();
+    for node in nodes {
+        let full_path = if prefix.is_empty() {
+            node.info.path.clone()
+        } else {
+            format!("{}/{}", prefix, node.info.path)
+        };
+        let resolved_path = base_dir.join(&full_path);
+        map.insert(full_path.clone(), (resolved_path, node.info.clone()));
+        // Recurse into children
+        map.extend(build_project_map(&node.children, base_dir, &full_path));
+    }
+    map
+}
+
+// ============================================================================
+// Orphan Detection
+// ============================================================================
+
+/// Information about an orphaned nested meta repo.
+#[derive(Debug, Clone)]
+pub struct OrphanWarning {
+    /// Path to the current (orphaned) meta directory
+    pub current: PathBuf,
+    /// Path to the parent meta directory
+    pub parent: PathBuf,
+    /// Suggested key to add to parent's .meta file
+    pub suggested_key: String,
+    /// Format of the parent's config file (for showing appropriate syntax)
+    pub parent_format: ConfigFormat,
+}
+
+/// Find a parent .meta config (if any) above the given meta directory.
+///
+/// Starts searching from the parent of `meta_dir` and walks up.
+/// Returns None if this is the root meta repo (no parent .meta found).
+pub fn find_parent_meta_config(meta_dir: &Path) -> Option<(PathBuf, ConfigFormat)> {
+    let parent = meta_dir.parent()?;
+    find_meta_config(parent, None)
+}
+
+/// Check if a meta directory is tracked by its parent meta config.
+///
+/// Returns `Some(OrphanWarning)` if there's a parent .meta that doesn't include
+/// this directory in its project list (directly or transitively).
+/// Returns `None` if tracked or if there's no parent meta.
+pub fn check_orphan_status(meta_dir: &Path) -> Option<OrphanWarning> {
+    let (parent_config, parent_format) = find_parent_meta_config(meta_dir)?;
+    let parent_meta_dir = parent_config.parent()?;
+
+    // Walk the parent's project tree to see what's tracked
+    let tree = walk_meta_tree(parent_meta_dir, None).ok()?;
+    let flat_paths = flatten_meta_tree(&tree);
+
+    // Get the relative path from parent to current
+    let relative = meta_dir.strip_prefix(parent_meta_dir).ok()?;
+    let relative_str = relative.to_string_lossy();
+
+    // Check if this path is in the flattened tree
+    if flat_paths.iter().any(|p| p == &*relative_str) {
+        None // Tracked, not orphan
+    } else {
+        // Extract the first path component as the suggested key
+        let suggested_key = relative
+            .components()
+            .next()?
+            .as_os_str()
+            .to_string_lossy()
+            .to_string();
+
+        Some(OrphanWarning {
+            current: meta_dir.to_path_buf(),
+            parent: parent_meta_dir.to_path_buf(),
+            suggested_key,
+            parent_format,
+        })
     }
 }
 
@@ -600,5 +708,379 @@ mod tests {
         .unwrap();
         let defaults = load_meta_defaults(dir.path());
         assert!(defaults.parallel);
+    }
+
+    // ============================================================================
+    // Nested meta repos (meta: true field)
+    // ============================================================================
+
+    #[test]
+    fn test_parse_nested_meta_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".meta"),
+            r#"{
+                "projects": {
+                    "core": "git@github.com:org/core.git",
+                    "vendor": { "repo": "git@github.com:org/vendor.git", "meta": true }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let (projects, _) = parse_meta_config(&dir.path().join(".meta")).unwrap();
+        assert_eq!(projects.len(), 2);
+
+        let vendor = projects.iter().find(|p| p.name == "vendor").unwrap();
+        assert_eq!(vendor.repo.as_ref().unwrap(), "git@github.com:org/vendor.git");
+        assert_eq!(vendor.path, "vendor");
+
+        let core = projects.iter().find(|p| p.name == "core").unwrap();
+        assert!(core.repo.is_some());
+        assert_eq!(core.repo.as_ref().unwrap(), "git@github.com:org/core.git");
+    }
+
+    #[test]
+    fn test_parse_nested_meta_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".meta.yaml"),
+            "projects:\n  core: git@github.com:org/core.git\n  vendor:\n    repo: git@github.com:org/vendor.git\n    meta: true\n",
+        )
+        .unwrap();
+
+        let (projects, _) = parse_meta_config(&dir.path().join(".meta.yaml")).unwrap();
+        assert_eq!(projects.len(), 2);
+
+        let vendor = projects.iter().find(|p| p.name == "vendor").unwrap();
+        assert_eq!(vendor.repo.as_ref().unwrap(), "git@github.com:org/vendor.git");
+    }
+
+    #[test]
+    fn test_parse_nested_meta_with_custom_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".meta"),
+            r#"{
+                "projects": {
+                    "vendor": {
+                        "repo": "git@github.com:org/vendor.git",
+                        "path": "third_party/vendor",
+                        "meta": true
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let (projects, _) = parse_meta_config(&dir.path().join(".meta")).unwrap();
+        assert_eq!(projects.len(), 1);
+
+        let vendor = &projects[0];
+        assert_eq!(vendor.repo.as_ref().unwrap(), "git@github.com:org/vendor.git");
+        assert_eq!(vendor.name, "vendor");
+        assert_eq!(vendor.path, "third_party/vendor");
+    }
+
+    #[test]
+    fn test_has_no_repo() {
+        let info = ProjectInfo {
+            name: "vendor".to_string(),
+            path: "vendor".to_string(),
+            repo: None,
+            tags: vec![],
+            provides: vec![],
+            depends_on: vec![],
+        };
+        assert!(info.has_no_repo());
+
+        let info_with_repo = ProjectInfo {
+            name: "core".to_string(),
+            path: "core".to_string(),
+            repo: Some("git@github.com:org/core.git".to_string()),
+            tags: vec![],
+            provides: vec![],
+            depends_on: vec![],
+        };
+        assert!(!info_with_repo.has_no_repo());
+    }
+
+    #[test]
+    fn test_walk_meta_tree_nested_meta_with_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let vendor = dir.path().join("vendor");
+        let nested = vendor.join("tree-sitter-markdown");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        // Root .meta with nested meta project (has repo URL + meta: true)
+        std::fs::write(
+            dir.path().join(".meta"),
+            r#"{"projects": {"vendor": {"repo": "git@github.com:org/vendor.git", "meta": true}}}"#,
+        )
+        .unwrap();
+
+        // Nested .meta inside vendor (simulates what exists after cloning)
+        std::fs::write(
+            vendor.join(".meta"),
+            r#"{"projects": {"tree-sitter-markdown": "git@github.com:org/tsm.git"}}"#,
+        )
+        .unwrap();
+
+        let tree = walk_meta_tree(dir.path(), None).unwrap();
+        assert_eq!(tree.len(), 1);
+
+        let vendor_node = &tree[0];
+        assert_eq!(vendor_node.info.name, "vendor");
+        assert_eq!(vendor_node.info.repo.as_ref().unwrap(), "git@github.com:org/vendor.git");
+        assert!(vendor_node.is_meta);
+        assert_eq!(vendor_node.children.len(), 1);
+
+        let nested_node = &vendor_node.children[0];
+        assert_eq!(nested_node.info.name, "tree-sitter-markdown");
+        assert!(nested_node.info.repo.is_some());
+    }
+
+    // ============================================================================
+    // Orphan detection tests
+    // ============================================================================
+
+    #[test]
+    fn test_find_parent_meta_config_none_at_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".meta"), r#"{"projects": {}}"#).unwrap();
+
+        // No parent above this directory
+        let result = find_parent_meta_config(dir.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_parent_meta_config_finds_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("vendor");
+        std::fs::create_dir(&nested).unwrap();
+
+        // Parent .meta
+        std::fs::write(dir.path().join(".meta"), r#"{"projects": {}}"#).unwrap();
+        // Nested .meta
+        std::fs::write(nested.join(".meta"), r#"{"projects": {}}"#).unwrap();
+
+        let result = find_parent_meta_config(&nested);
+        assert!(result.is_some());
+        let (path, _) = result.unwrap();
+        assert_eq!(path, dir.path().join(".meta"));
+    }
+
+    #[test]
+    fn test_check_orphan_status_not_orphan_when_tracked() {
+        let dir = tempfile::tempdir().unwrap();
+        let vendor = dir.path().join("vendor");
+        std::fs::create_dir(&vendor).unwrap();
+
+        // Parent .meta tracks vendor with repo URL and meta: true
+        std::fs::write(
+            dir.path().join(".meta"),
+            r#"{"projects": {"vendor": {"repo": "git@github.com:org/vendor.git", "meta": true}}}"#,
+        )
+        .unwrap();
+        // Nested .meta (simulates what exists after cloning vendor)
+        std::fs::write(vendor.join(".meta"), r#"{"projects": {}}"#).unwrap();
+
+        let result = check_orphan_status(&vendor);
+        assert!(result.is_none(), "vendor should not be orphan when tracked");
+    }
+
+    #[test]
+    fn test_check_orphan_status_is_orphan_when_not_tracked() {
+        let dir = tempfile::tempdir().unwrap();
+        let vendor = dir.path().join("vendor");
+        std::fs::create_dir(&vendor).unwrap();
+
+        // Parent .meta does NOT track vendor
+        std::fs::write(
+            dir.path().join(".meta"),
+            r#"{"projects": {"other": "git@github.com:org/other.git"}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir(dir.path().join("other")).unwrap();
+        // Nested .meta
+        std::fs::write(vendor.join(".meta"), r#"{"projects": {}}"#).unwrap();
+
+        let result = check_orphan_status(&vendor);
+        assert!(result.is_some(), "vendor should be orphan when not tracked");
+
+        let warning = result.unwrap();
+        assert_eq!(warning.current, vendor);
+        assert_eq!(warning.parent, dir.path());
+        assert_eq!(warning.suggested_key, "vendor");
+    }
+
+    #[test]
+    fn test_check_orphan_status_no_parent_means_not_orphan() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".meta"), r#"{"projects": {}}"#).unwrap();
+
+        // No parent .meta above this one
+        let result = check_orphan_status(dir.path());
+        assert!(result.is_none(), "should not be orphan if no parent exists");
+    }
+
+    #[test]
+    fn test_check_orphan_status_deeply_nested_tracked() {
+        // Test 3 levels deep: root -> vendor -> sub-vendor -> deep-lib
+        let dir = tempfile::tempdir().unwrap();
+        let vendor = dir.path().join("vendor");
+        let sub_vendor = vendor.join("sub-vendor");
+        let deep_lib = sub_vendor.join("deep-lib");
+        std::fs::create_dir_all(&deep_lib).unwrap();
+
+        // Root tracks vendor as nested meta
+        std::fs::write(
+            dir.path().join(".meta"),
+            r#"{"projects": {"vendor": {"repo": "git@github.com:org/vendor.git", "meta": true}}}"#,
+        )
+        .unwrap();
+
+        // Vendor tracks sub-vendor as nested meta
+        std::fs::write(
+            vendor.join(".meta"),
+            r#"{"projects": {"sub-vendor": {"repo": "git@github.com:org/sub-vendor.git", "meta": true}}}"#,
+        )
+        .unwrap();
+
+        // Sub-vendor tracks deep-lib
+        std::fs::write(
+            sub_vendor.join(".meta"),
+            r#"{"projects": {"deep-lib": "git@github.com:org/deep-lib.git"}}"#,
+        )
+        .unwrap();
+
+        // Check from sub-vendor's perspective (should not be orphan - tracked by vendor)
+        let result = check_orphan_status(&sub_vendor);
+        assert!(result.is_none(), "sub-vendor should not be orphan when tracked by vendor");
+    }
+
+    #[test]
+    fn test_check_orphan_status_deeply_nested_orphan() {
+        // Test orphan detection at 2 levels deep
+        let dir = tempfile::tempdir().unwrap();
+        let vendor = dir.path().join("vendor");
+        let orphan_dir = vendor.join("orphan-project");
+        std::fs::create_dir_all(&orphan_dir).unwrap();
+        std::fs::create_dir(dir.path().join("backend")).unwrap();
+
+        // Root tracks vendor and backend
+        std::fs::write(
+            dir.path().join(".meta"),
+            r#"{"projects": {"vendor": {"repo": "git@github.com:org/vendor.git", "meta": true}, "backend": "git@github.com:org/backend.git"}}"#,
+        )
+        .unwrap();
+
+        // Vendor does NOT track orphan-project
+        std::fs::write(
+            vendor.join(".meta"),
+            r#"{"projects": {"lib": "git@github.com:org/lib.git"}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir(vendor.join("lib")).unwrap();
+
+        // Orphan has its own .meta
+        std::fs::write(
+            orphan_dir.join(".meta"),
+            r#"{"projects": {}}"#,
+        )
+        .unwrap();
+
+        // Check from orphan's perspective
+        let result = check_orphan_status(&orphan_dir);
+        assert!(result.is_some(), "orphan-project should be orphan when not tracked by vendor");
+
+        let warning = result.unwrap();
+        assert_eq!(warning.suggested_key, "orphan-project");
+        assert_eq!(warning.parent, vendor);
+    }
+
+    #[test]
+    fn test_walk_meta_tree_handles_malformed_nested_meta() {
+        // When a nested .meta file is malformed, we should skip it gracefully
+        let dir = tempfile::tempdir().unwrap();
+        let vendor = dir.path().join("vendor");
+        std::fs::create_dir(&vendor).unwrap();
+
+        // Root .meta is valid
+        std::fs::write(
+            dir.path().join(".meta"),
+            r#"{"projects": {"vendor": {"repo": "git@github.com:org/vendor.git", "meta": true}}}"#,
+        )
+        .unwrap();
+
+        // Nested .meta is malformed JSON
+        std::fs::write(
+            vendor.join(".meta"),
+            r#"{"projects": {this is not valid json}"#,
+        )
+        .unwrap();
+
+        // Should still return the tree without the nested children
+        let tree = walk_meta_tree(dir.path(), None).unwrap();
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].info.name, "vendor");
+        // Children should be empty because the nested .meta was malformed
+        assert_eq!(tree[0].children.len(), 0);
+    }
+
+    #[test]
+    fn test_build_project_map_empty_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree: Vec<MetaTreeNode> = vec![];
+        let map = build_project_map(&tree, dir.path(), "");
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_build_project_map_with_custom_path() {
+        // Test that custom paths are handled correctly in the map
+        let dir = tempfile::tempdir().unwrap();
+        let custom_path = dir.path().join("custom/path/to/project");
+        std::fs::create_dir_all(&custom_path).unwrap();
+
+        std::fs::write(
+            dir.path().join(".meta"),
+            r#"{"projects": {"my-project": {"repo": "git@github.com:org/my-project.git", "path": "custom/path/to/project"}}}"#,
+        )
+        .unwrap();
+
+        let tree = walk_meta_tree(dir.path(), None).unwrap();
+        let map = build_project_map(&tree, dir.path(), "");
+
+        // The key should be the path, not the name
+        assert!(map.contains_key("custom/path/to/project"));
+        let (path, info) = map.get("custom/path/to/project").unwrap();
+        assert_eq!(info.name, "my-project");
+        assert_eq!(*path, custom_path);
+    }
+
+    #[test]
+    fn test_check_orphan_status_yaml_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let vendor = dir.path().join("vendor");
+        std::fs::create_dir(&vendor).unwrap();
+
+        // Parent .meta.yaml does NOT track vendor
+        std::fs::write(
+            dir.path().join(".meta.yaml"),
+            "projects:\n  other:\n    repo: git@github.com:org/other.git\n",
+        )
+        .unwrap();
+        std::fs::create_dir(dir.path().join("other")).unwrap();
+
+        // Nested .meta (JSON)
+        std::fs::write(vendor.join(".meta"), r#"{"projects": {}}"#).unwrap();
+
+        let result = check_orphan_status(&vendor);
+        assert!(result.is_some(), "vendor should be orphan when not tracked");
+
+        let warning = result.unwrap();
+        assert!(matches!(warning.parent_format, ConfigFormat::Yaml));
     }
 }

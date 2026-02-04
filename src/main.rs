@@ -2,7 +2,9 @@ use anyhow::Result;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use colored::*;
 use loop_lib::run;
-use meta_cli::config::{self, find_meta_config, parse_meta_config, MetaTreeNode, ProjectInfo};
+use meta_cli::config::{
+    self, find_meta_config, parse_meta_config, ConfigFormat, MetaTreeNode, ProjectInfo,
+};
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -406,6 +408,9 @@ fn main() -> Result<()> {
     let mut cli = Cli::parse();
 
     log::debug!("cli.json = {}", cli.json);
+
+    // Check for orphaned nested meta repo and warn the user
+    check_and_warn_orphan();
 
     // Discover plugins early to handle --help requests and plugin listing
     let mut subprocess_plugins = SubprocessPluginManager::new();
@@ -1181,6 +1186,63 @@ fn unrecognized_command_error(
     std::process::exit(1);
 }
 
+/// Check if current directory is in an orphaned nested meta repo and warn the user.
+///
+/// An "orphan" is a nested meta repo that isn't tracked by its parent meta config.
+/// This helps users understand why recursive operations might not find their nested repos.
+fn check_and_warn_orphan() {
+    let current_dir = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+
+    // Find the nearest .meta config
+    let Some((config_path, _)) = find_meta_config(&current_dir, None) else {
+        return;
+    };
+
+    let meta_dir = match config_path.parent() {
+        Some(p) => p.to_path_buf(),
+        None => return,
+    };
+
+    // Check if this meta repo is orphaned (not tracked by parent)
+    if let Some(warning) = config::check_orphan_status(&meta_dir) {
+        eprintln!(
+            "{}: This meta repo is not tracked by its parent.",
+            "warning".yellow().bold()
+        );
+        eprintln!("  Current: {}", warning.current.display());
+        eprintln!("  Parent:  {}", warning.parent.display());
+        eprintln!();
+
+        // Show format-appropriate syntax
+        let config_file = match warning.parent_format {
+            ConfigFormat::Json => ".meta",
+            ConfigFormat::Yaml => ".meta.yaml",
+        };
+        eprintln!(
+            "  To include it, add to {}/{}:",
+            warning.parent.display(),
+            config_file
+        );
+        match warning.parent_format {
+            ConfigFormat::Json => {
+                eprintln!(
+                    "    \"{}\": {{ \"repo\": \"<git-url>\", \"meta\": true }}",
+                    warning.suggested_key
+                );
+            }
+            ConfigFormat::Yaml => {
+                eprintln!("    {}:", warning.suggested_key);
+                eprintln!("      repo: <git-url>");
+                eprintln!("      meta: true");
+            }
+        }
+        eprintln!();
+    }
+}
+
 /// Flatten a meta tree into path strings, optionally filtering by tag.
 /// If tag_filter is Some, only includes nodes whose tags match (and recurses into them).
 fn flatten_with_tag_filter(nodes: &[MetaTreeNode], tag_filter: &Option<String>) -> Vec<String> {
@@ -1246,7 +1308,10 @@ mod tests {
         // Simple format: path defaults to project name
         let repo1 = projects.iter().find(|p| p.name == "repo1").unwrap();
         assert_eq!(repo1.path, "repo1");
-        assert_eq!(repo1.repo, "git@github.com:org/repo1.git");
+        assert_eq!(
+            repo1.repo.as_ref().unwrap(),
+            "git@github.com:org/repo1.git"
+        );
         assert!(repo1.tags.is_empty());
 
         assert_eq!(
@@ -1278,7 +1343,7 @@ mod tests {
         let api = &projects[0];
         assert_eq!(api.name, "api");
         assert_eq!(api.path, "./services/api");
-        assert_eq!(api.repo, "git@github.com:org/api.git");
+        assert_eq!(api.repo.as_ref().unwrap(), "git@github.com:org/api.git");
         assert_eq!(api.tags, vec!["backend", "rust"]);
     }
 
@@ -1334,7 +1399,10 @@ ignore:
 
         let web_app = projects.iter().find(|p| p.name == "web-app").unwrap();
         assert_eq!(web_app.path, "web-app");
-        assert_eq!(web_app.repo, "git@github.com:org/web-app.git");
+        assert_eq!(
+            web_app.repo.as_ref().unwrap(),
+            "git@github.com:org/web-app.git"
+        );
 
         let api = projects.iter().find(|p| p.name == "api").unwrap();
         assert_eq!(api.path, "./backend/api");

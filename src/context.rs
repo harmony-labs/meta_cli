@@ -230,7 +230,9 @@ pub struct CommandRef {
 pub struct RepoContext {
     pub name: String,
     pub path: String,
-    pub repo: String,
+    /// Git remote URL. Should be present for all normal projects.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -439,7 +441,7 @@ mod tests {
         RepoContext {
             name: name.to_string(),
             path: name.to_string(),
-            repo: format!("git@github.com:org/{name}.git"),
+            repo: Some(format!("git@github.com:org/{name}.git")),
             branch: branch.map(|s| s.to_string()),
             dirty,
             modified_count: modified,

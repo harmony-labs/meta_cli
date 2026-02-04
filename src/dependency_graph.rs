@@ -22,7 +22,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 pub struct ProjectDependencies {
     pub name: String,
     pub path: String,
-    pub repo: String,
+    /// Git remote URL. Should be present for all normal projects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     pub tags: Vec<String>,
     /// What this project provides (e.g., APIs, libraries)
     pub provides: Vec<String>,
@@ -417,7 +419,7 @@ mod tests {
             ProjectDependencies {
                 name: "shared-utils".to_string(),
                 path: "shared-utils".to_string(),
-                repo: "git@github.com:org/shared-utils.git".to_string(),
+                repo: Some("git@github.com:org/shared-utils.git".to_string()),
                 tags: vec!["lib".to_string()],
                 provides: vec!["utils".to_string()],
                 depends_on: vec![],
@@ -425,7 +427,7 @@ mod tests {
             ProjectDependencies {
                 name: "auth-service".to_string(),
                 path: "auth-service".to_string(),
-                repo: "git@github.com:org/auth-service.git".to_string(),
+                repo: Some("git@github.com:org/auth-service.git".to_string()),
                 tags: vec!["backend".to_string()],
                 provides: vec!["auth-api".to_string()],
                 depends_on: vec!["shared-utils".to_string()],
@@ -433,7 +435,7 @@ mod tests {
             ProjectDependencies {
                 name: "api-service".to_string(),
                 path: "api-service".to_string(),
-                repo: "git@github.com:org/api-service.git".to_string(),
+                repo: Some("git@github.com:org/api-service.git".to_string()),
                 tags: vec!["backend".to_string()],
                 provides: vec!["api-v2".to_string()],
                 depends_on: vec!["auth-service".to_string(), "shared-utils".to_string()],
@@ -441,7 +443,7 @@ mod tests {
             ProjectDependencies {
                 name: "web-app".to_string(),
                 path: "web-app".to_string(),
-                repo: "git@github.com:org/web-app.git".to_string(),
+                repo: Some("git@github.com:org/web-app.git".to_string()),
                 tags: vec!["frontend".to_string()],
                 provides: vec![],
                 depends_on: vec!["api-v2".to_string()], // Depends on provided item

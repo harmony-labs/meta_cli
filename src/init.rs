@@ -227,6 +227,8 @@ fn install_claude_integration_to(
     }
 
     // Try to register Harmony Labs marketplace if claude CLI is available
+    // Skip in tests to avoid external CLI calls that slow down test execution
+    #[cfg(not(test))]
     register_marketplace(verbose);
 
     Ok(())
@@ -391,6 +393,7 @@ fn hooks_equal(a: &Value, b: &Value) -> bool {
 
 /// Register the Harmony Labs marketplace with Claude Code (if available).
 /// This is best-effort — if `claude` is not on PATH, skip silently.
+#[cfg(not(test))]
 fn register_marketplace(verbose: bool) {
     use std::process::Command;
 
