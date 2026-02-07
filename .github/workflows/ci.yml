@@ -45,6 +45,12 @@ jobs:
           repository = "https://github.com/harmony-labs/meta"
           EOF
 
+      - name: Create VERSION file
+        shell: bash
+        run: |
+          # Extract version from meta_cli Cargo.toml
+          grep '^version' meta_cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/' > VERSION
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -85,6 +91,11 @@ jobs:
           license = "MIT"
           repository = "https://github.com/harmony-labs/meta"
           EOF
+
+      - name: Create VERSION file
+        run: |
+          # Extract version from meta_cli Cargo.toml
+          grep '^version' meta_cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/' > VERSION
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -128,6 +139,11 @@ jobs:
           license = "MIT"
           repository = "https://github.com/harmony-labs/meta"
           EOF
+
+      - name: Create VERSION file
+        run: |
+          # Extract version from meta_cli Cargo.toml
+          grep '^version' meta_cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/' > VERSION
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
