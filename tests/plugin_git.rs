@@ -320,10 +320,87 @@ fn test_git_clone_bootstrap_detection() {
         "Should detect 'git clone' as bootstrap command"
     );
 
-    // Test that args are correctly extracted (everything after 'git clone')
-    let clone_args: Vec<String> = commands.iter().skip(2).cloned().collect();
-    assert_eq!(clone_args.len(), 1);
-    assert_eq!(clone_args[0], "git@github.com:example/repo.git");
+    // Verify that command_args should be passed as-is to plugins.execute()
+    // The plugin will calculate remaining_args by skipping command words
+    // This is the fix: we pass full command_args, not pre-stripped args
+    assert_eq!(commands.len(), 3);
+    assert_eq!(commands[0], "git");
+    assert_eq!(commands[1], "clone");
+    assert_eq!(commands[2], "git@github.com:example/repo.git");
+}
+
+/// Test that subprocess_plugins correctly extracts remaining args from full command_args
+/// This verifies the fix for git clone argument passing
+#[test]
+fn test_remaining_args_calculation_for_git_clone() {
+    // Simulate what subprocess_plugins does when receiving a git clone command
+    // command = "git clone", args = ["git", "clone", "git@github.com:example/repo.git"]
+    let command = "git clone";
+    let args: Vec<String> = vec![
+        "git".to_string(),
+        "clone".to_string(),
+        "git@github.com:example/repo.git".to_string(),
+    ];
+
+    // This is the calculation from subprocess_plugins.rs:257-258
+    let cmd_word_count = command.split_whitespace().count();
+    let remaining_args: Vec<String> = args.iter().skip(cmd_word_count).cloned().collect();
+
+    assert_eq!(cmd_word_count, 2, "git clone has 2 words");
+    assert_eq!(
+        remaining_args.len(),
+        1,
+        "Should have 1 remaining arg (the URL)"
+    );
+    assert_eq!(remaining_args[0], "git@github.com:example/repo.git");
+}
+
+/// Test remaining args calculation with multiple clone options
+#[test]
+fn test_remaining_args_with_clone_options() {
+    let command = "git clone";
+    let args: Vec<String> = vec![
+        "git".to_string(),
+        "clone".to_string(),
+        "--depth".to_string(),
+        "1".to_string(),
+        "--recursive".to_string(),
+        "git@github.com:example/repo.git".to_string(),
+        "target-dir".to_string(),
+    ];
+
+    let cmd_word_count = command.split_whitespace().count();
+    let remaining_args: Vec<String> = args.iter().skip(cmd_word_count).cloned().collect();
+
+    assert_eq!(remaining_args.len(), 5);
+    assert_eq!(remaining_args[0], "--depth");
+    assert_eq!(remaining_args[1], "1");
+    assert_eq!(remaining_args[2], "--recursive");
+    assert_eq!(remaining_args[3], "git@github.com:example/repo.git");
+    assert_eq!(remaining_args[4], "target-dir");
+}
+
+/// Test that passing pre-stripped args would result in empty remaining_args (the bug)
+#[test]
+fn test_pre_stripped_args_bug_scenario() {
+    // This demonstrates the bug that was fixed:
+    // If args were pre-stripped (skipping "git" and "clone"), remaining_args would be empty
+    let command = "git clone";
+    let pre_stripped_args: Vec<String> = vec!["git@github.com:example/repo.git".to_string()];
+
+    let cmd_word_count = command.split_whitespace().count(); // 2
+    let remaining_args: Vec<String> = pre_stripped_args
+        .iter()
+        .skip(cmd_word_count)
+        .cloned()
+        .collect();
+
+    // This shows the bug: remaining_args is empty because we skipped 2 from a 1-element vec
+    assert_eq!(
+        remaining_args.len(),
+        0,
+        "Pre-stripped args results in empty remaining_args (the bug)"
+    );
 }
 
 /// Test that git clone with options extracts args correctly

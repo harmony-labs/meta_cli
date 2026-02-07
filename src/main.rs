@@ -568,8 +568,6 @@ fn handle_command_dispatch(
 
     if is_git_clone {
         // Handle git clone directly via plugin without requiring .meta file
-        let clone_args: Vec<String> = command_args.iter().skip(2).cloned().collect();
-
         let subprocess_options = PluginRequestOptions {
             json_output: cli.json,
             verbose: cli.verbose,
@@ -583,7 +581,7 @@ fn handle_command_dispatch(
             strict: cli.strict,
         };
 
-        if plugins.execute("git clone", &clone_args, &[], subprocess_options)? {
+        if plugins.execute("git clone", &command_args, &[], subprocess_options)? {
             if cli.verbose {
                 println!("{}", "Git clone handled by subprocess plugin.".green());
             }
