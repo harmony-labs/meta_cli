@@ -33,9 +33,11 @@ jobs:
 
       - name: Clone dependencies
         run: |
-          git clone --depth 1 https://github.com/harmony-labs/meta_core.git
-          git clone --depth 1 https://github.com/harmony-labs/meta_plugin_protocol.git
-          git clone --depth 1 https://github.com/harmony-labs/loop_lib.git
+          BRANCH="${{ github.head_ref || github.ref_name }}"
+          for repo in meta_core meta_plugin_protocol loop_lib; do
+            git clone --depth 1 -b "$BRANCH" "https://github.com/harmony-labs/${repo}.git" 2>/dev/null || \
+            git clone --depth 1 "https://github.com/harmony-labs/${repo}.git"
+          done
 
       - name: Create workspace Cargo.toml
         run: |
