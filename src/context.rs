@@ -11,9 +11,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use meta_core::config::{self, ProjectInfo};
 use crate::dependency_graph::DependencyGraph;
 use crate::git_utils;
+use meta_core::config::{self, ProjectInfo};
 
 // ── Cache ───────────────────────────────────────────────
 
