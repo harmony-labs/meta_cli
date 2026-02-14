@@ -11,9 +11,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use crate::config::{self, ProjectInfo};
 use crate::dependency_graph::DependencyGraph;
 use crate::git_utils;
+use meta_core::config::{self, ProjectInfo};
 
 // ── Cache ───────────────────────────────────────────────
 
@@ -296,7 +296,7 @@ fn build_dependency_map(projects: &[ProjectInfo]) -> Option<HashMap<String, Vec<
         return None;
     }
 
-    let dep_projects: Vec<_> = projects.iter().map(|p| p.to_dependencies()).collect();
+    let dep_projects: Vec<_> = projects.iter().map(|p| p.clone().into()).collect();
     let graph = DependencyGraph::build(dep_projects).ok()?;
 
     let mut map = HashMap::new();

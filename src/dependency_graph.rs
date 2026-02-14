@@ -17,6 +17,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use meta_core::config::ProjectInfo;
+
 /// Represents a project with dependency information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectDependencies {
@@ -30,6 +32,19 @@ pub struct ProjectDependencies {
     pub provides: Vec<String>,
     /// What this project depends on (other project names or provided items)
     pub depends_on: Vec<String>,
+}
+
+impl From<ProjectInfo> for ProjectDependencies {
+    fn from(p: ProjectInfo) -> Self {
+        Self {
+            name: p.name,
+            path: p.path,
+            repo: p.repo,
+            tags: p.tags,
+            provides: p.provides,
+            depends_on: p.depends_on,
+        }
+    }
 }
 
 /// Dependency graph for analyzing relationships between projects

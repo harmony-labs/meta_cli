@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use colored::*;
 use loop_lib::run;
-use meta_cli::config::{
+use meta_core::config::{
     self, find_meta_config, parse_meta_config, ConfigFormat, MetaTreeNode, ProjectInfo,
 };
 use std::io::Write;
