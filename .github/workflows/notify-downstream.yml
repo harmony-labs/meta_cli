@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Wait for CI
-        uses: lewagon/wait-on-check-action@v1.3.4
+        uses: lewagon/wait-on-check-action@v1.5.0
         with:
           ref: ${{ github.sha }}
           check-name: 'Test (ubuntu-latest)'
@@ -21,11 +21,17 @@ jobs:
   notify:
     needs: wait-for-ci
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        downstream:
+          - meta_git_cli
+          - meta_project_cli
+          - meta_rust_cli
+          - meta_mcp
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Determine source
         id: source
@@ -43,82 +49,32 @@ jobs:
             echo "message=$MSG" >> $GITHUB_OUTPUT
             echo "repo=${{ github.repository }}" >> $GITHUB_OUTPUT
             echo "repo_name=${{ github.event.repository.name }}" >> $GITHUB_OUTPUT
+            echo "actor=${{ github.actor }}" >> $GITHUB_OUTPUT
             echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
             echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-            if [[ "$MSG" =~ ^feat ]]; then echo "type=feat" >> $GITHUB_OUTPUT
-            elif [[ "$MSG" =~ ^fix ]]; then echo "type=fix" >> $GITHUB_OUTPUT
-            elif [[ "$MSG" =~ ^chore ]]; then echo "type=chore" >> $GITHUB_OUTPUT
-            elif [[ "$MSG" =~ ^docs ]]; then echo "type=docs" >> $GITHUB_OUTPUT
-            elif [[ "$MSG" =~ ^test ]]; then echo "type=test" >> $GITHUB_OUTPUT
-            elif [[ "$MSG" =~ ^refactor ]]; then echo "type=refactor" >> $GITHUB_OUTPUT
+            if [[ "$MSG" =~ ^feat[:(] ]]; then echo "type=feat" >> $GITHUB_OUTPUT
+            elif [[ "$MSG" =~ ^fix[:(] ]]; then echo "type=fix" >> $GITHUB_OUTPUT
+            elif [[ "$MSG" =~ ^chore[:(] ]]; then echo "type=chore" >> $GITHUB_OUTPUT
+            elif [[ "$MSG" =~ ^docs[:(] ]]; then echo "type=docs" >> $GITHUB_OUTPUT
+            elif [[ "$MSG" =~ ^test[:(] ]]; then echo "type=test" >> $GITHUB_OUTPUT
+            elif [[ "$MSG" =~ ^refactor[:(] ]]; then echo "type=refactor" >> $GITHUB_OUTPUT
             else echo "type=other" >> $GITHUB_OUTPUT
             fi
           fi
 
-      - name: Notify meta_git_cli
+      - name: Notify ${{ matrix.downstream }}
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.PARENT_REPO_PAT }}
-          repository: harmony-labs/meta_git_cli
+          repository: harmony-labs/${{ matrix.downstream }}
           event-type: dependency-updated
-          client-payload: |
+          client-payload: >-
             {
-              "repo": "${{ steps.source.outputs.repo }}",
-              "repo_name": "${{ steps.source.outputs.repo_name }}",
-              "sha": "${{ steps.source.outputs.sha }}",
-              "short_sha": "${{ steps.source.outputs.short_sha }}",
-              "message": "${{ steps.source.outputs.message }}",
-              "type": "${{ steps.source.outputs.type }}",
-              "actor": "${{ steps.source.outputs.actor }}"
-            }
-
-      - name: Notify meta_project_cli
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.PARENT_REPO_PAT }}
-          repository: harmony-labs/meta_project_cli
-          event-type: dependency-updated
-          client-payload: |
-            {
-              "repo": "${{ steps.source.outputs.repo }}",
-              "repo_name": "${{ steps.source.outputs.repo_name }}",
-              "sha": "${{ steps.source.outputs.sha }}",
-              "short_sha": "${{ steps.source.outputs.short_sha }}",
-              "message": "${{ steps.source.outputs.message }}",
-              "type": "${{ steps.source.outputs.type }}",
-              "actor": "${{ steps.source.outputs.actor }}"
-            }
-
-      - name: Notify meta_rust_cli
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.PARENT_REPO_PAT }}
-          repository: harmony-labs/meta_rust_cli
-          event-type: dependency-updated
-          client-payload: |
-            {
-              "repo": "${{ steps.source.outputs.repo }}",
-              "repo_name": "${{ steps.source.outputs.repo_name }}",
-              "sha": "${{ steps.source.outputs.sha }}",
-              "short_sha": "${{ steps.source.outputs.short_sha }}",
-              "message": "${{ steps.source.outputs.message }}",
-              "type": "${{ steps.source.outputs.type }}",
-              "actor": "${{ steps.source.outputs.actor }}"
-            }
-
-      - name: Notify meta_mcp
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.PARENT_REPO_PAT }}
-          repository: harmony-labs/meta_mcp
-          event-type: dependency-updated
-          client-payload: |
-            {
-              "repo": "${{ steps.source.outputs.repo }}",
-              "repo_name": "${{ steps.source.outputs.repo_name }}",
-              "sha": "${{ steps.source.outputs.sha }}",
-              "short_sha": "${{ steps.source.outputs.short_sha }}",
-              "message": "${{ steps.source.outputs.message }}",
-              "type": "${{ steps.source.outputs.type }}",
-              "actor": "${{ steps.source.outputs.actor }}"
+              "repo": ${{ toJSON(steps.source.outputs.repo) }},
+              "repo_name": ${{ toJSON(steps.source.outputs.repo_name) }},
+              "sha": ${{ toJSON(steps.source.outputs.sha) }},
+              "short_sha": ${{ toJSON(steps.source.outputs.short_sha) }},
+              "message": ${{ toJSON(steps.source.outputs.message) }},
+              "type": ${{ toJSON(steps.source.outputs.type) }},
+              "actor": ${{ toJSON(steps.source.outputs.actor) }}
             }
