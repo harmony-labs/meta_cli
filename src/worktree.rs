@@ -105,8 +105,18 @@ fn discover_repos_recursive(
     dir: &Path,
     repos: &mut Vec<WorktreeRepoInfo>,
 ) -> Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            log::debug!("Skipping unreadable directory {}: {e}", dir.display());
+            return Ok(());
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
         let sub_path = entry.path();
         if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
             continue;
@@ -125,8 +135,15 @@ fn discover_repos_recursive(
             .unwrap_or(false)
         {
             // This is a worktree repo — use relative path from root as alias
-            let source = source_repo_from_gitfile(&sub_git)?;
-            let branch = git_utils::current_branch(&sub_path).unwrap_or_else(|| "HEAD".to_string());
+            let source = match source_repo_from_gitfile(&sub_git) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::debug!("Skipping {}: {e}", sub_path.display());
+                    continue;
+                }
+            };
+            let branch =
+                git_utils::current_branch(&sub_path).unwrap_or_else(|| "HEAD".to_string());
             let alias = sub_path
                 .strip_prefix(root)
                 .unwrap_or(&sub_path)
@@ -141,7 +158,9 @@ fn discover_repos_recursive(
             });
         } else {
             // Not a repo — recurse into intermediate directory
-            discover_repos_recursive(root, &sub_path, repos)?;
+            if let Err(e) = discover_repos_recursive(root, &sub_path, repos) {
+                log::debug!("Skipping subtree {}: {e}", sub_path.display());
+            }
         }
     }
     Ok(())
