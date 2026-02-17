@@ -81,43 +81,88 @@ pub fn discover_worktree_repos(task_dir: &Path) -> Result<Vec<WorktreeRepoInfo>>
         });
     }
 
-    // Scan subdirectories for worktrees
+    // Recursively scan subdirectories for worktrees.
+    // Repos may be nested (e.g., "vendor/tree-sitter-markdown") when
+    // dependencies have paths with intermediate directories.
     if task_dir.is_dir() {
-        for entry in std::fs::read_dir(task_dir)? {
-            let entry = entry?;
-            let sub_path = entry.path();
-            if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let sub_git = sub_path.join(".git");
-            if sub_git
-                .symlink_metadata()
-                .map(|m| m.is_file())
-                .unwrap_or(false)
-            {
-                let source = source_repo_from_gitfile(&sub_git)?;
-                let branch =
-                    git_utils::current_branch(&sub_path).unwrap_or_else(|| "HEAD".to_string());
-                let alias = sub_path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                repos.push(WorktreeRepoInfo {
-                    alias,
-                    branch,
-                    path: sub_path,
-                    source_path: source,
-                    created_branch: None,
-                });
-            }
-        }
+        discover_repos_recursive(task_dir, task_dir, &mut repos)?;
     }
 
     // Sort by alias for deterministic output ("." sorts first)
     repos.sort_by(|a, b| a.alias.cmp(&b.alias));
 
     Ok(repos)
+}
+
+/// Recursively scan `dir` for git worktree repos, recording aliases as
+/// relative paths from `root` (the worktree task directory).
+///
+/// A directory with a `.git` file is a worktree repo — record it and stop
+/// recursing into it. A directory without `.git` is an intermediate directory
+/// (e.g., `vendor/`) — recurse into it to find nested repos.
+fn discover_repos_recursive(
+    root: &Path,
+    dir: &Path,
+    repos: &mut Vec<WorktreeRepoInfo>,
+) -> Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            log::debug!("Skipping unreadable directory {}: {e}", dir.display());
+            return Ok(());
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let sub_path = entry.path();
+        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            continue;
+        }
+
+        // Skip hidden directories
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+
+        let sub_git = sub_path.join(".git");
+        if sub_git
+            .symlink_metadata()
+            .map(|m| m.is_file())
+            .unwrap_or(false)
+        {
+            // This is a worktree repo — use relative path from root as alias
+            let source = match source_repo_from_gitfile(&sub_git) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::debug!("Skipping {}: {e}", sub_path.display());
+                    continue;
+                }
+            };
+            let branch = git_utils::current_branch(&sub_path).unwrap_or_else(|| "HEAD".to_string());
+            let alias = sub_path
+                .strip_prefix(root)
+                .unwrap_or(&sub_path)
+                .to_string_lossy()
+                .to_string();
+            repos.push(WorktreeRepoInfo {
+                alias,
+                branch,
+                path: sub_path,
+                source_path: source,
+                created_branch: None,
+            });
+        } else {
+            // Not a repo — recurse into intermediate directory
+            if let Err(e) = discover_repos_recursive(root, &sub_path, repos) {
+                log::debug!("Skipping subtree {}: {e}", sub_path.display());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Parse a .git file to find the primary checkout path.
