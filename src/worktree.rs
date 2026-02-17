@@ -126,8 +126,7 @@ fn discover_repos_recursive(
         {
             // This is a worktree repo — use relative path from root as alias
             let source = source_repo_from_gitfile(&sub_git)?;
-            let branch =
-                git_utils::current_branch(&sub_path).unwrap_or_else(|| "HEAD".to_string());
+            let branch = git_utils::current_branch(&sub_path).unwrap_or_else(|| "HEAD".to_string());
             let alias = sub_path
                 .strip_prefix(root)
                 .unwrap_or(&sub_path)
