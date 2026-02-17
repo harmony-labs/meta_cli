@@ -142,8 +142,7 @@ fn discover_repos_recursive(
                     continue;
                 }
             };
-            let branch =
-                git_utils::current_branch(&sub_path).unwrap_or_else(|| "HEAD".to_string());
+            let branch = git_utils::current_branch(&sub_path).unwrap_or_else(|| "HEAD".to_string());
             let alias = sub_path
                 .strip_prefix(root)
                 .unwrap_or(&sub_path)
