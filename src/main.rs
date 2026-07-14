@@ -462,8 +462,15 @@ fn main() -> Result<()> {
 
     log::debug!("cli.json = {}", cli.json);
 
-    // Check for orphaned nested meta repo and warn the user
-    check_and_warn_orphan();
+    // Cargo/Rust namespace help must not inspect workspace configuration.
+    // Other command paths retain the existing orphan warning behavior.
+    let skip_orphan_check = matches!(
+        cli.command.as_ref(),
+        Some(Commands::External(args)) if is_cargo_namespace_help(args, cli.help)
+    );
+    if !skip_orphan_check {
+        check_and_warn_orphan();
+    }
 
     // Discover plugins early to handle --help requests and plugin listing
     let mut subprocess_plugins = SubprocessPluginManager::new();
@@ -532,17 +539,18 @@ fn main() -> Result<()> {
             handle_command_dispatch(args.command, &cli, &subprocess_plugins, true)
         }
         Some(Commands::External(args)) => {
-            // clap doesn't capture global flags that appear after an external
-            // subcommand name. Extract long-form global flags here so they
-            // work in both positions (before and after the subcommand).
+            // clap captures every token after an external subcommand name.
+            // Apply namespace-specific ownership before routing the command.
             let mut args = args;
             extract_global_flags(&mut args, &mut cli);
 
             // Keep root plugin help fast and plugin-aware, but let nested help
             // requests reach the matched plugin command implementation.
             if let Some(first) = args.first() {
-                let wants_help = args.iter().any(|a| a == "--help" || a == "-h");
+                let wants_help = cli.help || contains_help_before_separator(&args);
                 let is_bare = args.len() == 1;
+                let is_cargo_namespace = matches!(first.as_str(), "cargo" | "rust");
+                let is_prefix_meta_help = cli.help && is_cargo_namespace;
                 let is_root_help = wants_help
                     && args.len() == 2
                     && matches!(args.get(1).map(String::as_str), Some("--help" | "-h"));
@@ -554,7 +562,10 @@ fn main() -> Result<()> {
                     .collect();
                 let is_promoted = promoted_commands.contains(&first.to_string());
 
-                if is_root_help || (is_bare && !is_promoted) {
+                if is_prefix_meta_help
+                    || is_root_help
+                    || (is_bare && (!is_promoted || is_cargo_namespace))
+                {
                     if let Some(help_text) = subprocess_plugins.get_plugin_help(first) {
                         println!("{help_text}");
                         return Ok(());
@@ -785,10 +796,11 @@ fn handle_command_dispatch(
                 return Ok(());
             }
 
-            // No config found — degraded legacy path with warning
+            // No config found — worktree paths are still authoritative for
+            // plugin dispatch, but config-backed tags/dependencies are unavailable.
             if cli.verbose {
                 eprintln!(
-                    "{} No .meta config found for worktree '{}'. Tags, plugins, and dependency features unavailable.",
+                    "{} No .meta config found for worktree '{}'. Tags and dependency features unavailable.",
                     "warning:".yellow().bold(),
                     task_name
                 );
@@ -801,10 +813,10 @@ fn handle_command_dispatch(
             let exclude_opt = none_if_empty(exclude_filters);
 
             let config = loop_lib::LoopConfig {
-                directories,
+                directories: directories.clone(),
                 ignore: vec![],
-                include_filters: include_opt,
-                exclude_filters: exclude_opt,
+                include_filters: include_opt.clone(),
+                exclude_filters: exclude_opt.clone(),
                 verbose: cli.verbose,
                 silent: cli.silent,
                 parallel, // Use the determined parallel mode, not hardcoded false
@@ -817,7 +829,36 @@ fn handle_command_dispatch(
                 root_dir: None, // Worktree paths don't use "." convention
             };
 
-            run(&config, &command_str)?;
+            let subprocess_options = PluginRequestOptions {
+                json_output: cli.json,
+                verbose: cli.verbose,
+                parallel,
+                dry_run,
+                silent: cli.silent,
+                recursive,
+                depth,
+                include_filters: include_opt,
+                exclude_filters: exclude_opt,
+                strict: cli.strict,
+            };
+
+            if plugins.execute(
+                &command_str,
+                &command_args,
+                &directories,
+                subprocess_options,
+            )? {
+                if cli.verbose {
+                    println!(
+                        "{}",
+                        "Command handled by subprocess plugin (worktree without config).".green()
+                    );
+                }
+            } else if is_explicit_exec {
+                run(&config, &command_str)?;
+            } else {
+                unrecognized_command_error(&command_args, &command_str, plugins);
+            }
             return Ok(());
         }
     }
@@ -1245,18 +1286,72 @@ fn handle_plugin_command(
 
 // === Helpers ===
 
-/// Extract meta-only global flags from external subcommand args.
+/// Whether an external command explicitly enters Cargo's namespace.
+fn is_cargo_namespace(args: &[String]) -> bool {
+    matches!(args.first().map(String::as_str), Some("cargo" | "rust"))
+}
+
+/// Whether a help flag appears before the command's `--` separator.
+fn contains_help_before_separator(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+}
+
+/// Cargo/Rust help paths that must not inspect Meta workspace configuration.
+fn is_cargo_namespace_help(args: &[String], prefix_help: bool) -> bool {
+    is_cargo_namespace(args)
+        && (prefix_help || args.len() == 1 || contains_help_before_separator(args))
+}
+
+/// Extract Meta-owned global flags from external subcommand args.
 ///
 /// clap's `external_subcommand` captures all tokens after the first unrecognized
-/// subcommand, including global flags like `--json`. This function pulls them
-/// out and applies them to the CLI struct so they work regardless of position.
+/// subcommand, including global flags like `--json`. For non-Cargo namespaces,
+/// this function pulls Meta-owned flags out and applies them to the CLI struct.
 ///
-/// Only extracts flags that are meta-global and NOT reused by plugin subcommands.
-/// Flags like `--dry-run` and `--parallel` are left in args because plugin
-/// subcommands (e.g. `worktree prune --dry-run`, `worktree exec --parallel`)
-/// define their own versions and need to see them.
+/// Cargo and Rust explicitly own all options after their namespace. The sole
+/// compatibility exception is postfix `--recursive` for build, test, and clean,
+/// which continues to select nested Meta projects. No arguments after a `--`
+/// separator are inspected. Other namespaces retain the existing extraction
+/// behavior for Meta-only global flags.
 fn extract_global_flags(args: &mut Vec<String>, cli: &mut Cli) {
+    if is_cargo_namespace(args) {
+        let supports_recursive_compat = matches!(
+            args.get(1).map(String::as_str),
+            Some("build" | "test" | "clean")
+        );
+
+        if supports_recursive_compat {
+            let mut after_separator = false;
+            args.retain(|arg| {
+                if after_separator {
+                    return true;
+                }
+                if arg == "--" {
+                    after_separator = true;
+                    return true;
+                }
+                if arg == "--recursive" {
+                    cli.recursive = true;
+                    return false;
+                }
+                true
+            });
+        }
+        return;
+    }
+
+    let mut after_separator = false;
     args.retain(|arg| {
+        if after_separator {
+            return true;
+        }
+        if arg == "--" {
+            after_separator = true;
+            return true;
+        }
+
         match arg.as_str() {
             "--json" => {
                 cli.json = true;
@@ -1422,6 +1517,181 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    fn empty_cli() -> Cli {
+        Cli::try_parse_from(["meta"]).unwrap()
+    }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn test_cargo_recursive_compatibility_is_narrow() {
+        for namespace in ["cargo", "rust"] {
+            for subcommand in ["build", "test", "clean"] {
+                let mut cli = empty_cli();
+                let mut args = strings(&[namespace, subcommand, "--all", "--recursive"]);
+
+                extract_global_flags(&mut args, &mut cli);
+
+                assert!(cli.recursive, "{namespace} {subcommand}");
+                assert_eq!(args, strings(&[namespace, subcommand, "--all"]));
+            }
+        }
+
+        for subcommand in ["update", "nextest"] {
+            let mut cli = empty_cli();
+            let mut args = strings(&["cargo", subcommand, "--recursive"]);
+            let expected = args.clone();
+
+            extract_global_flags(&mut args, &mut cli);
+
+            assert!(!cli.recursive, "cargo {subcommand}");
+            assert_eq!(args, expected);
+        }
+    }
+
+    #[test]
+    fn test_cargo_postfix_flags_and_separator_payload_are_cargo_owned() {
+        let mut cli = empty_cli();
+        let mut args = strings(&[
+            "cargo",
+            "test",
+            "--verbose",
+            "--json",
+            "--",
+            "--recursive",
+            "--help",
+            "--silent",
+            "--primary",
+            "--strict",
+        ]);
+        let expected = args.clone();
+
+        extract_global_flags(&mut args, &mut cli);
+
+        assert_eq!(args, expected);
+        assert!(!cli.recursive);
+        assert!(!cli.verbose);
+        assert!(!cli.json);
+        assert!(!cli.silent);
+        assert!(!cli.primary);
+        assert!(!cli.strict);
+        assert!(!contains_help_before_separator(&args));
+    }
+
+    #[test]
+    fn test_non_cargo_extraction_stops_at_separator() {
+        let mut cli = empty_cli();
+        let mut args = strings(&[
+            "git",
+            "status",
+            "--verbose",
+            "--recursive",
+            "--",
+            "--json",
+            "--silent",
+            "--primary",
+            "--strict",
+        ]);
+
+        extract_global_flags(&mut args, &mut cli);
+
+        assert_eq!(
+            args,
+            strings(&[
+                "git",
+                "status",
+                "--",
+                "--json",
+                "--silent",
+                "--primary",
+                "--strict",
+            ])
+        );
+        assert!(cli.verbose);
+        assert!(cli.recursive);
+        assert!(!cli.json);
+        assert!(!cli.silent);
+        assert!(!cli.primary);
+        assert!(!cli.strict);
+    }
+
+    #[test]
+    fn test_non_cargo_global_flag_extraction_remains_compatible() {
+        let mut cli = empty_cli();
+        let mut args = strings(&[
+            "git",
+            "status",
+            "--json",
+            "--verbose",
+            "--silent",
+            "--primary",
+            "--recursive",
+            "--strict",
+        ]);
+
+        extract_global_flags(&mut args, &mut cli);
+
+        assert_eq!(args, strings(&["git", "status"]));
+        assert!(cli.json);
+        assert!(cli.verbose);
+        assert!(cli.silent);
+        assert!(cli.primary);
+        assert!(cli.recursive);
+        assert!(cli.strict);
+    }
+
+    #[test]
+    fn test_cargo_help_classification_stops_at_separator() {
+        assert!(is_cargo_namespace_help(&strings(&["cargo"]), false));
+        assert!(is_cargo_namespace_help(&strings(&["rust"]), false));
+        assert!(is_cargo_namespace_help(
+            &strings(&["cargo", "check", "--help"]),
+            false
+        ));
+        assert!(is_cargo_namespace_help(
+            &strings(&["rust", "nextest", "-h"]),
+            false
+        ));
+        assert!(is_cargo_namespace_help(&strings(&["cargo", "check"]), true));
+
+        assert!(!is_cargo_namespace_help(
+            &strings(&["cargo", "test", "--", "--help"]),
+            false
+        ));
+        assert!(!is_cargo_namespace_help(
+            &strings(&["cargo", "check"]),
+            false
+        ));
+        assert!(!is_cargo_namespace_help(
+            &strings(&["git", "status", "--help"]),
+            false
+        ));
+    }
+
+    #[test]
+    fn test_meta_controls_before_cargo_namespace_remain_global() {
+        let cli = Cli::try_parse_from([
+            "meta",
+            "--dry-run",
+            "--verbose",
+            "cargo",
+            "check",
+            "--verbose",
+        ])
+        .unwrap();
+
+        assert!(cli.dry_run);
+        assert!(cli.verbose);
+        match cli.command {
+            Some(Commands::External(args)) => {
+                assert_eq!(args, strings(&["cargo", "check", "--verbose"]));
+            }
+            _ => panic!("expected external Cargo command"),
+        }
+    }
 
     #[test]
     fn test_parse_meta_config_valid_simple_format() {
