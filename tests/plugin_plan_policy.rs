@@ -39,7 +39,7 @@ fn create_plugin_dir(root: &Path) -> PathBuf {
 }
 
 #[test]
-fn prefix_help_does_not_execute_plugin_commands() {
+fn help_before_separator_does_not_read_config_or_execute_plugin_commands() {
     let temp = tempdir().unwrap();
     let plugin_dir = create_plugin_dir(temp.path());
     let marker = temp.path().join("plugin-executed");
@@ -48,7 +48,7 @@ fn prefix_help_does_not_execute_plugin_commands() {
         &plugin_dir.join("meta-tool"),
         r#"#!/bin/sh
 if [ "$1" = "--meta-plugin-info" ]; then
-  printf '%s\n' '{"name":"tool","version":"1.0.0","commands":["tool"]}'
+  printf '%s\n' '{"name":"suite","version":"1.0.0","commands":["tool"]}'
   exit 0
 fi
 if [ "$1" = "--meta-plugin-exec" ]; then
@@ -71,7 +71,9 @@ exit 1
             .output()
             .unwrap();
         assert!(output.status.success(), "args: {args:?}");
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage:"));
+        assert!(String::from_utf8_lossy(&output.stdout)
+            .to_ascii_lowercase()
+            .contains("usage:"));
         assert!(!marker.exists(), "prefix help executed {args:?}");
     }
 
@@ -83,6 +85,24 @@ exit 1
         .unwrap();
     assert!(output.status.success());
     assert!(!marker.exists(), "prefix help executed in a Meta workspace");
+
+    fs::remove_file(temp.path().join(".meta")).unwrap();
+    fs::write(temp.path().join(".meta.yaml"), "projects: [malformed").unwrap();
+    // `tool` is promoted because it differs from the plugin name (`suite`).
+    // Bare promoted roots and their root help must still avoid config parsing.
+    for args in [&["tool"][..], &["tool", "--help"][..]] {
+        let output = meta_command(temp.path(), &plugin_dir, temp.path())
+            .env("META_TEST_MARKER", &marker)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "args: {args:?}; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!marker.exists(), "help executed {args:?}");
+    }
 }
 
 #[test]

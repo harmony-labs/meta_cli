@@ -462,8 +462,16 @@ fn main() -> Result<()> {
 
     log::debug!("cli.json = {}", cli.json);
 
-    // Check for orphaned nested meta repo and warn the user
-    check_and_warn_orphan();
+    // Help for an external command is metadata-only: do not inspect workspace
+    // configuration before plugin help has had a chance to return.
+    let external_help_request = matches!(
+        cli.command.as_ref(),
+        Some(Commands::External(args))
+            if cli.help || args.len() == 1 || contains_help_before_separator(args)
+    );
+    if !external_help_request {
+        check_and_warn_orphan();
+    }
 
     // Discover plugins early to handle --help requests and plugin listing
     let mut subprocess_plugins = SubprocessPluginManager::new();
@@ -540,26 +548,25 @@ fn main() -> Result<()> {
 
             let has_forwarded_help = contains_help_before_separator(&args);
             if cli.help && !has_forwarded_help {
+                if let Some(first) = args.first() {
+                    if let Some(help_text) = subprocess_plugins.get_plugin_help(first) {
+                        println!("{help_text}");
+                        return Ok(());
+                    }
+                }
                 print_help_with_plugins(&subprocess_plugins, false);
                 return Ok(());
             }
 
-            // Keep root plugin help fast and plugin-aware, but let nested help
-            // requests reach the matched plugin command implementation.
+            // Keep root and bare plugin help fast and plugin-aware, while
+            // nested help reaches the plugin command implementation below.
             if let Some(first) = args.first() {
                 let is_bare = args.len() == 1;
                 let is_root_help = has_forwarded_help
                     && args.len() == 2
                     && matches!(args.get(1).map(String::as_str), Some("--help" | "-h"));
 
-                let promoted_commands: Vec<String> = subprocess_plugins
-                    .get_promoted_commands()
-                    .iter()
-                    .map(|(name, _, _)| name.clone())
-                    .collect();
-                let is_promoted = promoted_commands.contains(&first.to_string());
-
-                if is_root_help || (is_bare && !is_promoted) {
+                if is_bare || is_root_help {
                     if let Some(help_text) = subprocess_plugins.get_plugin_help(first) {
                         println!("{help_text}");
                         return Ok(());
