@@ -132,6 +132,77 @@ exit 1
 }
 
 #[test]
+fn declared_bare_help_is_metadata_only_without_reclassifying_other_commands() {
+    let temp = tempdir().unwrap();
+    let plugin_dir = create_plugin_dir(temp.path());
+    let marker = temp.path().join("plugin-executed");
+    fs::write(temp.path().join(".meta.yaml"), "projects: [malformed").unwrap();
+
+    write_executable(
+        &plugin_dir.join("meta-suite"),
+        r#"#!/bin/sh
+if [ "$1" = "--meta-plugin-info" ]; then
+  printf '%s\n' '{"name":"suite","version":"1.0.0","commands":["tool"],"bare_help_commands":["tool"],"help":{"usage":"meta tool <command>"}}'
+  exit 0
+fi
+if [ "$1" = "--meta-plugin-exec" ]; then
+  IFS= read -r request || :
+  : > "$META_TEST_MARKER"
+  printf '%s\n' '{"plan":{"commands":[]}}'
+  exit 0
+fi
+exit 1
+"#,
+    );
+
+    let output = meta_command(temp.path(), &plugin_dir, temp.path())
+        .env("META_TEST_MARKER", &marker)
+        .arg("tool")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("meta tool <command>"));
+    assert!(
+        !marker.exists(),
+        "declared bare help executed the plugin command"
+    );
+
+    fs::remove_file(temp.path().join(".meta.yaml")).unwrap();
+    fs::write(temp.path().join(".meta"), r#"{"projects":{}}"#).unwrap();
+    write_executable(
+        &plugin_dir.join("meta-runner"),
+        r#"#!/bin/sh
+if [ "$1" = "--meta-plugin-info" ]; then
+  printf '%s\n' '{"name":"runner","version":"1.0.0","commands":["action"]}'
+  exit 0
+fi
+if [ "$1" = "--meta-plugin-exec" ]; then
+  IFS= read -r request || :
+  : > "$META_TEST_MARKER"
+  printf '%s\n' '{"plan":{"commands":[]}}'
+  exit 0
+fi
+exit 1
+"#,
+    );
+
+    let output = meta_command(temp.path(), &plugin_dir, temp.path())
+        .env("META_TEST_MARKER", &marker)
+        .arg("action")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        marker.exists(),
+        "unlisted promoted command was reclassified as help"
+    );
+}
+
+#[test]
 fn separator_payload_and_policy_capability_reach_the_plugin_unchanged() {
     let temp = tempdir().unwrap();
     let plugin_dir = create_plugin_dir(temp.path());

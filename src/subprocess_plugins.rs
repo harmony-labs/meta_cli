@@ -4,7 +4,7 @@
 //! This approach provides better isolation, language flexibility, and simpler debugging.
 
 use anyhow::{Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -28,7 +28,14 @@ pub struct SubprocessPlugin {
 /// Manager for subprocess-based plugins
 pub struct SubprocessPluginManager {
     plugins: HashMap<String, SubprocessPlugin>,
+    bare_help_commands: HashSet<String>,
     verbose: bool,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct PluginDiscoveryExtensions {
+    #[serde(default)]
+    bare_help_commands: Vec<String>,
 }
 
 /// Apply the execution behavior selected by a plugin plan.
@@ -54,6 +61,7 @@ impl SubprocessPluginManager {
     pub fn new() -> Self {
         Self {
             plugins: HashMap::new(),
+            bare_help_commands: HashSet::new(),
             verbose: false,
         }
     }
@@ -161,6 +169,8 @@ impl SubprocessPluginManager {
                     Ok(info) => info,
                     Err(_) => return Ok(()), // Not a valid plugin, skip silently
                 };
+                let extensions: PluginDiscoveryExtensions =
+                    serde_json::from_slice(&output.stdout).unwrap_or_default();
 
                 if self.verbose {
                     println!(
@@ -173,6 +183,12 @@ impl SubprocessPluginManager {
 
                 // Don't override if already loaded (first one wins)
                 if !self.plugins.contains_key(&info.name) {
+                    self.bare_help_commands.extend(
+                        extensions
+                            .bare_help_commands
+                            .into_iter()
+                            .filter(|command| info.commands.contains(command)),
+                    );
                     self.plugins.insert(
                         info.name.clone(),
                         SubprocessPlugin {
@@ -187,6 +203,11 @@ impl SubprocessPluginManager {
             }
         }
         Ok(())
+    }
+
+    /// Whether a plugin declares a bare command root as metadata-only help.
+    pub fn is_bare_help_command(&self, command: &str) -> bool {
+        self.bare_help_commands.contains(command)
     }
 
     /// Check if any plugin handles the given command

@@ -462,20 +462,23 @@ fn main() -> Result<()> {
 
     log::debug!("cli.json = {}", cli.json);
 
+    // Discover plugins early to handle --help requests and plugin listing
+    let mut subprocess_plugins = SubprocessPluginManager::new();
+    subprocess_plugins.discover_plugins(cli.verbose)?;
+
     // External help is metadata-only. Let the matched plugin answer it before
     // workspace discovery so malformed or absent config cannot hide help.
     let external_help_request = matches!(
         cli.command.as_ref(),
         Some(Commands::External(args))
-            if cli.help || contains_help_before_separator(args)
+            if cli.help
+                || contains_help_before_separator(args)
+                || (args.len() == 1
+                    && subprocess_plugins.is_bare_help_command(&args[0]))
     );
     if !external_help_request {
         check_and_warn_orphan();
     }
-
-    // Discover plugins early to handle --help requests and plugin listing
-    let mut subprocess_plugins = SubprocessPluginManager::new();
-    subprocess_plugins.discover_plugins(cli.verbose)?;
 
     // Handle --help flag at top level
     if cli.help && cli.command.is_none() {
@@ -567,7 +570,8 @@ fn main() -> Result<()> {
                     .collect();
                 let is_promoted = promoted_commands.contains(&first.to_string());
 
-                if is_root_help || (is_bare && !is_promoted) {
+                let declared_bare_help = subprocess_plugins.is_bare_help_command(first);
+                if is_root_help || (is_bare && (!is_promoted || declared_bare_help)) {
                     if let Some(help_text) = subprocess_plugins.get_plugin_help(first) {
                         println!("{help_text}");
                         return Ok(());
