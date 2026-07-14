@@ -538,12 +538,17 @@ fn main() -> Result<()> {
             let mut args = args;
             extract_global_flags(&mut args, &mut cli);
 
+            let has_forwarded_help = contains_help_before_separator(&args);
+            if cli.help && !has_forwarded_help {
+                print_help_with_plugins(&subprocess_plugins, false);
+                return Ok(());
+            }
+
             // Keep root plugin help fast and plugin-aware, but let nested help
             // requests reach the matched plugin command implementation.
             if let Some(first) = args.first() {
-                let wants_help = args.iter().any(|a| a == "--help" || a == "-h");
                 let is_bare = args.len() == 1;
-                let is_root_help = wants_help
+                let is_root_help = has_forwarded_help
                     && args.len() == 2
                     && matches!(args.get(1).map(String::as_str), Some("--help" | "-h"));
 
@@ -561,7 +566,7 @@ fn main() -> Result<()> {
                     }
                 }
 
-                if wants_help {
+                if has_forwarded_help {
                     let command_str = args.join(" ");
                     let options = PluginRequestOptions {
                         json_output: cli.json,
@@ -785,10 +790,11 @@ fn handle_command_dispatch(
                 return Ok(());
             }
 
-            // No config found — degraded legacy path with warning
+            // No config found — worktree paths are still authoritative for
+            // plugin dispatch, but config-backed tags/dependencies are unavailable.
             if cli.verbose {
                 eprintln!(
-                    "{} No .meta config found for worktree '{}'. Tags, plugins, and dependency features unavailable.",
+                    "{} No .meta config found for worktree '{}'. Tags and dependency features unavailable.",
                     "warning:".yellow().bold(),
                     task_name
                 );
@@ -801,10 +807,10 @@ fn handle_command_dispatch(
             let exclude_opt = none_if_empty(exclude_filters);
 
             let config = loop_lib::LoopConfig {
-                directories,
+                directories: directories.clone(),
                 ignore: vec![],
-                include_filters: include_opt,
-                exclude_filters: exclude_opt,
+                include_filters: include_opt.clone(),
+                exclude_filters: exclude_opt.clone(),
                 verbose: cli.verbose,
                 silent: cli.silent,
                 parallel, // Use the determined parallel mode, not hardcoded false
@@ -817,7 +823,36 @@ fn handle_command_dispatch(
                 root_dir: None, // Worktree paths don't use "." convention
             };
 
-            run(&config, &command_str)?;
+            let subprocess_options = PluginRequestOptions {
+                json_output: cli.json,
+                verbose: cli.verbose,
+                parallel,
+                dry_run,
+                silent: cli.silent,
+                recursive,
+                depth,
+                include_filters: include_opt,
+                exclude_filters: exclude_opt,
+                strict: cli.strict,
+            };
+
+            if plugins.execute(
+                &command_str,
+                &command_args,
+                &directories,
+                subprocess_options,
+            )? {
+                if cli.verbose {
+                    println!(
+                        "{}",
+                        "Command handled by subprocess plugin (worktree without config).".green()
+                    );
+                }
+            } else if is_explicit_exec {
+                run(&config, &command_str)?;
+            } else {
+                unrecognized_command_error(&command_args, &command_str, plugins);
+            }
             return Ok(());
         }
     }
@@ -920,10 +955,11 @@ fn handle_command_dispatch(
         strict: cli.strict,
     };
 
-    if plugins.execute(
+    if plugins.execute_with_root(
         &command_str,
         &command_args,
         &project_paths,
+        Some(meta_dir),
         subprocess_options,
     )? {
         log::info!("Command was handled by subprocess plugin");
@@ -1256,7 +1292,16 @@ fn handle_plugin_command(
 /// subcommands (e.g. `worktree prune --dry-run`, `worktree exec --parallel`)
 /// define their own versions and need to see them.
 fn extract_global_flags(args: &mut Vec<String>, cli: &mut Cli) {
+    let mut after_separator = false;
     args.retain(|arg| {
+        if after_separator {
+            return true;
+        }
+        if arg == "--" {
+            after_separator = true;
+            return true;
+        }
+
         match arg.as_str() {
             "--json" => {
                 cli.json = true;
@@ -1285,6 +1330,13 @@ fn extract_global_flags(args: &mut Vec<String>, cli: &mut Cli) {
             _ => true, // keep in args
         }
     });
+}
+
+/// Whether a help flag appears before the command's `--` separator.
+fn contains_help_before_separator(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
 }
 
 /// Check whether a project's tags match a comma-separated tag filter string.
@@ -1422,6 +1474,51 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    fn empty_cli() -> Cli {
+        Cli::try_parse_from(["meta"]).unwrap()
+    }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn test_external_global_extraction_stops_at_separator() {
+        let mut cli = empty_cli();
+        let mut args = strings(&[
+            "tool",
+            "run",
+            "--verbose",
+            "--recursive",
+            "--",
+            "--json",
+            "--strict",
+            "--recursive",
+        ]);
+
+        extract_global_flags(&mut args, &mut cli);
+
+        assert!(cli.verbose);
+        assert!(cli.recursive);
+        assert!(!cli.json);
+        assert!(!cli.strict);
+        assert_eq!(
+            args,
+            strings(&["tool", "run", "--", "--json", "--strict", "--recursive"])
+        );
+    }
+
+    #[test]
+    fn test_forwarded_help_classification_stops_at_separator() {
+        assert!(contains_help_before_separator(&strings(&[
+            "tool", "run", "--help", "--", "payload"
+        ])));
+        assert!(contains_help_before_separator(&strings(&["tool", "-h"])));
+        assert!(!contains_help_before_separator(&strings(&[
+            "tool", "run", "--", "--help"
+        ])));
+    }
 
     #[test]
     fn test_parse_meta_config_valid_simple_format() {

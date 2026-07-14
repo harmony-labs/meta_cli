@@ -10,8 +10,8 @@ use std::process::{Command, Stdio};
 
 #[allow(unused_imports)]
 pub use meta_plugin_protocol::{
-    ExecutionPlan, PlanResponse as PluginResponse, PlannedCommand, PluginHelp, PluginInfo,
-    PluginRequest, PluginRequestOptions,
+    ExecutionPlan, PlanExecutionPolicy, PlanResponse as PluginResponse, PlannedCommand, PluginHelp,
+    PluginInfo, PluginRequest, PluginRequestOptions, HOST_CAPABILITY_PLAN_EXECUTION_POLICY_V1,
 };
 
 /// A discovered subprocess plugin
@@ -25,6 +25,19 @@ pub struct SubprocessPlugin {
 pub struct SubprocessPluginManager {
     plugins: HashMap<String, SubprocessPlugin>,
     verbose: bool,
+}
+
+/// Apply the execution behavior selected by a plugin plan.
+fn options_for_plan_execution(
+    policy: PlanExecutionPolicy,
+    options: &PluginRequestOptions,
+) -> PluginRequestOptions {
+    let mut execution_options = options.clone();
+    if !policy.apply_host_filters {
+        execution_options.include_filters = None;
+        execution_options.exclude_filters = None;
+    }
+    execution_options
 }
 
 impl Default for SubprocessPluginManager {
@@ -203,6 +216,18 @@ impl SubprocessPluginManager {
         projects: &[String],
         options: PluginRequestOptions,
     ) -> Result<bool> {
+        self.execute_with_root(command, args, projects, None, options)
+    }
+
+    /// Execute a command while preserving the caller's actual Meta root.
+    pub fn execute_with_root(
+        &self,
+        command: &str,
+        args: &[String],
+        projects: &[String],
+        root_dir: Option<&Path>,
+        options: PluginRequestOptions,
+    ) -> Result<bool> {
         let cmd_parts: Vec<&str> = command.split_whitespace().collect();
         if cmd_parts.is_empty() {
             return Ok(false);
@@ -236,7 +261,7 @@ impl SubprocessPluginManager {
         }
 
         if let Some((plugin, matched_cmd)) = best_match {
-            return self.execute_plugin(plugin, matched_cmd, args, projects, &options);
+            return self.execute_plugin(plugin, matched_cmd, args, projects, root_dir, &options);
         }
 
         Ok(false)
@@ -249,6 +274,7 @@ impl SubprocessPluginManager {
         command: &str,
         args: &[String],
         projects: &[String],
+        root_dir: Option<&Path>,
         options: &PluginRequestOptions,
     ) -> Result<bool> {
         // Extract the remaining args after the matched command
@@ -262,6 +288,7 @@ impl SubprocessPluginManager {
             args: remaining_args,
             projects: projects.to_vec(),
             cwd: std::env::current_dir()?.to_string_lossy().to_string(),
+            host_capabilities: vec![HOST_CAPABILITY_PLAN_EXECUTION_POLICY_V1.to_string()],
             options: options.clone(),
         };
 
@@ -313,7 +340,7 @@ impl SubprocessPluginManager {
         match serde_json::from_str::<PluginResponse>(&stdout_str) {
             Ok(response) => {
                 // Plugin returned an execution plan - execute it via loop_lib
-                self.execute_plan(&response.plan, options)
+                self.execute_plan(&response.plan, options, root_dir, response.execution_policy)
             }
             Err(_) => {
                 // Couldn't parse as our protocol - print output as-is (legacy behavior)
@@ -324,8 +351,22 @@ impl SubprocessPluginManager {
     }
 
     /// Execute an execution plan via loop_lib
-    fn execute_plan(&self, plan: &ExecutionPlan, options: &PluginRequestOptions) -> Result<bool> {
-        use loop_lib::{run_commands, DirCommand, LoopConfig};
+    fn execute_plan(
+        &self,
+        plan: &ExecutionPlan,
+        options: &PluginRequestOptions,
+        root_dir: Option<&Path>,
+        policy: PlanExecutionPolicy,
+    ) -> Result<bool> {
+        use loop_lib::{run_commands, run_commands_without_loop_aliases, DirCommand, LoopConfig};
+
+        let execution_options = options_for_plan_execution(policy, options);
+        let run_plan_commands: fn(&LoopConfig, &[DirCommand]) -> Result<()> =
+            if policy.expand_loop_aliases {
+                run_commands
+            } else {
+                run_commands_without_loop_aliases
+            };
 
         // Phase 1: Run pre_commands sequentially (setup tasks like SSH ControlMaster)
         if !plan.pre_commands.is_empty() {
@@ -337,7 +378,7 @@ impl SubprocessPluginManager {
             let pre_config = LoopConfig {
                 directories: vec![],
                 ignore: vec![],
-                verbose: options.verbose,
+                verbose: execution_options.verbose,
                 silent: true, // Pre-commands run silently unless verbose
                 add_aliases_to_global_looprc: false,
                 include_filters: None,
@@ -359,8 +400,8 @@ impl SubprocessPluginManager {
                 };
                 // Ignore failures for pre_commands (e.g., SSH socket already exists)
                 // The main commands will fail if setup was actually needed
-                if let Err(e) = run_commands(&pre_config, &[cmd]) {
-                    if options.verbose {
+                if let Err(e) = run_plan_commands(&pre_config, &[cmd]) {
+                    if execution_options.verbose {
                         eprintln!("Pre-command failed (continuing): {e}");
                     }
                 }
@@ -379,27 +420,24 @@ impl SubprocessPluginManager {
                 })
                 .collect();
 
-            // The first command's directory is the meta root (should display as ".")
-            let root_dir = commands.first().map(|c| PathBuf::from(&c.dir));
-
             let config = LoopConfig {
                 directories: vec![],
                 ignore: vec![],
-                verbose: options.verbose,
-                silent: options.silent,
+                verbose: execution_options.verbose,
+                silent: execution_options.silent,
                 add_aliases_to_global_looprc: false,
-                include_filters: options.include_filters.clone(),
-                exclude_filters: options.exclude_filters.clone(),
-                parallel: plan.parallel.unwrap_or(options.parallel),
-                dry_run: options.dry_run,
-                json_output: options.json_output,
+                include_filters: execution_options.include_filters.clone(),
+                exclude_filters: execution_options.exclude_filters.clone(),
+                parallel: plan.parallel.unwrap_or(execution_options.parallel),
+                dry_run: execution_options.dry_run,
+                json_output: execution_options.json_output,
                 spawn_stagger_ms: plan.spawn_stagger_ms.unwrap_or(0),
                 env: None,
                 max_parallel: plan.max_parallel,
-                root_dir,
+                root_dir: root_dir.map(Path::to_path_buf),
             };
 
-            run_commands(&config, &commands)?;
+            run_plan_commands(&config, &commands)?;
         }
 
         // Phase 3: Run post_commands sequentially (cleanup tasks)
@@ -407,7 +445,7 @@ impl SubprocessPluginManager {
             let post_config = LoopConfig {
                 directories: vec![],
                 ignore: vec![],
-                verbose: options.verbose,
+                verbose: execution_options.verbose,
                 silent: true,
                 add_aliases_to_global_looprc: false,
                 include_filters: None,
@@ -427,8 +465,8 @@ impl SubprocessPluginManager {
                     cmd: post_cmd.cmd.clone(),
                     env: post_cmd.env.clone(),
                 };
-                if let Err(e) = run_commands(&post_config, &[cmd]) {
-                    if options.verbose {
+                if let Err(e) = run_plan_commands(&post_config, &[cmd]) {
+                    if execution_options.verbose {
                         eprintln!("Post-command failed: {e}");
                     }
                 }
@@ -714,6 +752,7 @@ mod tests {
             args: vec!["--verbose".to_string()],
             projects: vec!["project1".to_string(), "project2".to_string()],
             cwd: "/home/user/workspace".to_string(),
+            host_capabilities: vec![HOST_CAPABILITY_PLAN_EXECUTION_POLICY_V1.to_string()],
             options: PluginRequestOptions {
                 json_output: true,
                 verbose: false,
@@ -727,6 +766,10 @@ mod tests {
         assert!(json.contains("\"command\":\"git status\""));
         assert!(json.contains("\"json_output\":true"));
         assert!(json.contains("\"parallel\":true"));
+        assert_eq!(
+            request.host_capabilities,
+            vec![HOST_CAPABILITY_PLAN_EXECUTION_POLICY_V1.to_string()]
+        );
     }
 
     #[test]
@@ -739,6 +782,29 @@ mod tests {
         assert!(!options.silent);
         assert!(options.include_filters.is_none());
         assert!(options.exclude_filters.is_none());
+    }
+
+    #[test]
+    fn test_plan_execution_policy_controls_host_filters() {
+        let options = PluginRequestOptions {
+            include_filters: Some(vec!["selected".to_string()]),
+            exclude_filters: Some(vec!["ignored".to_string()]),
+            ..Default::default()
+        };
+
+        let legacy = options_for_plan_execution(PlanExecutionPolicy::default(), &options);
+        assert_eq!(legacy.include_filters, options.include_filters);
+        assert_eq!(legacy.exclude_filters, options.exclude_filters);
+
+        let plugin_owned = options_for_plan_execution(
+            PlanExecutionPolicy {
+                expand_loop_aliases: false,
+                apply_host_filters: false,
+            },
+            &options,
+        );
+        assert!(plugin_owned.include_filters.is_none());
+        assert!(plugin_owned.exclude_filters.is_none());
     }
 
     #[test]
@@ -1085,6 +1151,7 @@ mod tests {
             args: vec![],
             projects: vec!["proj1".to_string()],
             cwd: "/workspace".to_string(),
+            host_capabilities: vec![],
             options: PluginRequestOptions {
                 json_output: false,
                 verbose: false,
@@ -1105,6 +1172,7 @@ mod tests {
             args: vec!["--release".to_string()],
             projects: vec![],
             cwd: ".".to_string(),
+            host_capabilities: vec![],
             options: PluginRequestOptions {
                 json_output: true,
                 verbose: true,
