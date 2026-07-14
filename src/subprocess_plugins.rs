@@ -27,6 +27,34 @@ pub struct SubprocessPluginManager {
     verbose: bool,
 }
 
+/// Options used after a plugin has returned an execution plan.
+///
+/// The Rust plugin's Cargo/Rust namespace implementation applies
+/// include/exclude filters while planning so it can distinguish a selected
+/// scope with no Cargo projects from an unfiltered scope. Reapplying those
+/// string filters to its normalized Windows paths can drop commands whose
+/// original path spelling used a short name or different casing. Other and
+/// older plugins continue to rely on the host execution layer for filtering.
+fn options_for_plan_execution(
+    plugin: &PluginInfo,
+    command: &str,
+    options: &PluginRequestOptions,
+) -> PluginRequestOptions {
+    let mut execution_options = options.clone();
+    let namespace = command.split_whitespace().next().unwrap_or_default();
+    let owns_namespace_root = plugin
+        .commands
+        .iter()
+        .any(|registered| registered == namespace);
+
+    if plugin.name == "rust" && matches!(namespace, "cargo" | "rust") && owns_namespace_root {
+        execution_options.include_filters = None;
+        execution_options.exclude_filters = None;
+    }
+
+    execution_options
+}
+
 impl Default for SubprocessPluginManager {
     fn default() -> Self {
         Self::new()
@@ -313,7 +341,8 @@ impl SubprocessPluginManager {
         match serde_json::from_str::<PluginResponse>(&stdout_str) {
             Ok(response) => {
                 // Plugin returned an execution plan - execute it via loop_lib
-                self.execute_plan(&response.plan, options)
+                let execution_options = options_for_plan_execution(&plugin.info, command, options);
+                self.execute_plan(&response.plan, &execution_options)
             }
             Err(_) => {
                 // Couldn't parse as our protocol - print output as-is (legacy behavior)
@@ -673,6 +702,19 @@ fn is_executable(path: &Path) -> bool {
 mod tests {
     use super::*;
 
+    fn plugin_info(name: &str, commands: &[&str]) -> PluginInfo {
+        PluginInfo {
+            name: name.to_string(),
+            version: "1.0.0".to_string(),
+            commands: commands
+                .iter()
+                .map(|command| (*command).to_string())
+                .collect(),
+            description: None,
+            help: None,
+        }
+    }
+
     #[test]
     fn test_plugin_manager_new() {
         let manager = SubprocessPluginManager::new();
@@ -739,6 +781,78 @@ mod tests {
         assert!(!options.silent);
         assert!(options.include_filters.is_none());
         assert!(options.exclude_filters.is_none());
+    }
+
+    #[test]
+    fn test_rust_plan_execution_does_not_reapply_directory_filters() {
+        let options = PluginRequestOptions {
+            json_output: true,
+            parallel: true,
+            dry_run: true,
+            include_filters: Some(vec!["included".to_string()]),
+            exclude_filters: Some(vec!["excluded".to_string()]),
+            ..Default::default()
+        };
+        let plugin = plugin_info("rust", &["cargo", "rust"]);
+
+        for namespace in ["cargo", "rust"] {
+            let execution = options_for_plan_execution(&plugin, namespace, &options);
+
+            assert!(execution.include_filters.is_none());
+            assert!(execution.exclude_filters.is_none());
+            assert!(execution.json_output);
+            assert!(execution.parallel);
+            assert!(execution.dry_run);
+        }
+
+        // Planning still receives the original options unchanged.
+        assert_eq!(
+            options.include_filters.as_deref(),
+            Some(&["included".to_string()][..])
+        );
+        assert_eq!(
+            options.exclude_filters.as_deref(),
+            Some(&["excluded".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn test_other_plugin_plans_keep_directory_filters() {
+        let options = PluginRequestOptions {
+            include_filters: Some(vec!["included".to_string()]),
+            exclude_filters: Some(vec!["excluded".to_string()]),
+            ..Default::default()
+        };
+
+        for (plugin, command) in [
+            (plugin_info("git", &["git status"]), "git status"),
+            (plugin_info("cargo-wrapper", &["cargo"]), "cargo"),
+        ] {
+            let execution = options_for_plan_execution(&plugin, command, &options);
+
+            assert_eq!(execution.include_filters, options.include_filters);
+            assert_eq!(execution.exclude_filters, options.exclude_filters);
+        }
+
+        let non_namespace =
+            options_for_plan_execution(&plugin_info("rust", &["cargo", "rust"]), "build", &options);
+        assert_eq!(non_namespace.include_filters, options.include_filters);
+        assert_eq!(non_namespace.exclude_filters, options.exclude_filters);
+    }
+
+    #[test]
+    fn test_legacy_rust_plugin_exact_commands_keep_directory_filters() {
+        let options = PluginRequestOptions {
+            include_filters: Some(vec!["included".to_string()]),
+            exclude_filters: Some(vec!["excluded".to_string()]),
+            ..Default::default()
+        };
+        let legacy = plugin_info("rust", &["cargo build", "cargo test"]);
+
+        let execution = options_for_plan_execution(&legacy, "cargo build", &options);
+
+        assert_eq!(execution.include_filters, options.include_filters);
+        assert_eq!(execution.exclude_filters, options.exclude_filters);
     }
 
     #[test]
