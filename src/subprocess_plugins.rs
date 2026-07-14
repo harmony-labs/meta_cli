@@ -13,6 +13,10 @@ pub use meta_plugin_protocol::{
     ExecutionPlan, PlanExecutionPolicy, PlanResponse as PluginResponse, PlannedCommand, PluginHelp,
     PluginInfo, PluginRequest, PluginRequestOptions, HOST_CAPABILITY_PLAN_EXECUTION_POLICY_V1,
 };
+use meta_plugin_protocol::{
+    PlanResponseWithPolicy as HostPluginResponse,
+    PluginRequestWithCapabilities as HostPluginRequest,
+};
 
 /// A discovered subprocess plugin
 #[derive(Debug, Clone)]
@@ -283,7 +287,7 @@ impl SubprocessPluginManager {
         let cmd_word_count = command.split_whitespace().count();
         let remaining_args: Vec<String> = args.iter().skip(cmd_word_count).cloned().collect();
 
-        let request = PluginRequest {
+        let request = HostPluginRequest {
             command: command.to_string(),
             args: remaining_args,
             projects: projects.to_vec(),
@@ -337,7 +341,7 @@ impl SubprocessPluginManager {
         }
 
         // Parse the plugin response
-        match serde_json::from_str::<PluginResponse>(&stdout_str) {
+        match serde_json::from_str::<HostPluginResponse>(&stdout_str) {
             Ok(response) => {
                 // Plugin returned an execution plan - execute it via loop_lib
                 self.execute_plan(&response.plan, options, root_dir, response.execution_policy)
@@ -747,7 +751,7 @@ mod tests {
 
     #[test]
     fn test_plugin_request_serialization() {
-        let request = PluginRequest {
+        let request = HostPluginRequest {
             command: "git status".to_string(),
             args: vec!["--verbose".to_string()],
             projects: vec!["project1".to_string(), "project2".to_string()],
@@ -1146,7 +1150,7 @@ mod tests {
 
     #[test]
     fn test_plugin_request_with_dry_run() {
-        let request = PluginRequest {
+        let request = HostPluginRequest {
             command: "git status".to_string(),
             args: vec![],
             projects: vec!["proj1".to_string()],
@@ -1167,7 +1171,7 @@ mod tests {
 
     #[test]
     fn test_plugin_request_all_options_enabled() {
-        let request = PluginRequest {
+        let request = HostPluginRequest {
             command: "build".to_string(),
             args: vec!["--release".to_string()],
             projects: vec![],

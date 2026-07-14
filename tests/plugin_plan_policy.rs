@@ -86,6 +86,52 @@ exit 1
 }
 
 #[test]
+fn nested_plugin_help_skips_workspace_config_and_reaches_plugin() {
+    let temp = tempdir().unwrap();
+    let plugin_dir = create_plugin_dir(temp.path());
+    let request_path = temp.path().join("plugin-request.json");
+    fs::write(temp.path().join(".meta.yaml"), "projects: [malformed").unwrap();
+
+    write_executable(
+        &plugin_dir.join("meta-tool"),
+        r#"#!/bin/sh
+if [ "$1" = "--meta-plugin-info" ]; then
+  printf '%s\n' '{"name":"tool","version":"1.0.0","commands":["tool"]}'
+  exit 0
+fi
+if [ "$1" = "--meta-plugin-exec" ]; then
+  IFS= read -r request || :
+  printf '%s\n' "$request" > "$META_TEST_REQUEST"
+  printf '%s\n' 'tool-owned nested help'
+  exit 0
+fi
+exit 1
+"#,
+    );
+
+    let output = meta_command(temp.path(), &plugin_dir, temp.path())
+        .env("META_TEST_REQUEST", &request_path)
+        .args(["tool", "run", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "tool-owned nested help"
+    );
+
+    let request: serde_json::Value =
+        serde_json::from_slice(&fs::read(&request_path).unwrap()).unwrap();
+    assert_eq!(request["command"], "tool");
+    assert_eq!(request["args"], serde_json::json!(["run", "--help"]));
+    assert_eq!(request["projects"], serde_json::json!([]));
+}
+
+#[test]
 fn separator_payload_and_policy_capability_reach_the_plugin_unchanged() {
     let temp = tempdir().unwrap();
     let plugin_dir = create_plugin_dir(temp.path());
