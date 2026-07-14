@@ -241,6 +241,18 @@ impl SubprocessPluginManager {
         projects: &[String],
         options: PluginRequestOptions,
     ) -> Result<bool> {
+        self.execute_with_root(command, args, projects, None, options)
+    }
+
+    /// Execute a command while preserving the caller's actual Meta root.
+    pub fn execute_with_root(
+        &self,
+        command: &str,
+        args: &[String],
+        projects: &[String],
+        root_dir: Option<&Path>,
+        options: PluginRequestOptions,
+    ) -> Result<bool> {
         let cmd_parts: Vec<&str> = command.split_whitespace().collect();
         if cmd_parts.is_empty() {
             return Ok(false);
@@ -274,7 +286,7 @@ impl SubprocessPluginManager {
         }
 
         if let Some((plugin, matched_cmd)) = best_match {
-            return self.execute_plugin(plugin, matched_cmd, args, projects, &options);
+            return self.execute_plugin(plugin, matched_cmd, args, projects, root_dir, &options);
         }
 
         Ok(false)
@@ -287,6 +299,7 @@ impl SubprocessPluginManager {
         command: &str,
         args: &[String],
         projects: &[String],
+        root_dir: Option<&Path>,
         options: &PluginRequestOptions,
     ) -> Result<bool> {
         // Extract the remaining args after the matched command
@@ -353,7 +366,12 @@ impl SubprocessPluginManager {
                 // Plugin returned an execution plan - execute it via loop_lib
                 let execution_options = options_for_plan_execution(&plugin.info, command, options);
                 let expand_loop_aliases = !is_rust_namespace_command(&plugin.info, command);
-                self.execute_plan(&response.plan, &execution_options, expand_loop_aliases)
+                self.execute_plan(
+                    &response.plan,
+                    &execution_options,
+                    root_dir,
+                    expand_loop_aliases,
+                )
             }
             Err(_) => {
                 // Couldn't parse as our protocol - print output as-is (legacy behavior)
@@ -368,6 +386,7 @@ impl SubprocessPluginManager {
         &self,
         plan: &ExecutionPlan,
         options: &PluginRequestOptions,
+        root_dir: Option<&Path>,
         expand_loop_aliases: bool,
     ) -> Result<bool> {
         use loop_lib::{run_commands, run_commands_without_loop_aliases, DirCommand, LoopConfig};
@@ -431,9 +450,6 @@ impl SubprocessPluginManager {
                 })
                 .collect();
 
-            // The first command's directory is the meta root (should display as ".")
-            let root_dir = commands.first().map(|c| PathBuf::from(&c.dir));
-
             let config = LoopConfig {
                 directories: vec![],
                 ignore: vec![],
@@ -448,7 +464,7 @@ impl SubprocessPluginManager {
                 spawn_stagger_ms: plan.spawn_stagger_ms.unwrap_or(0),
                 env: None,
                 max_parallel: plan.max_parallel,
-                root_dir,
+                root_dir: root_dir.map(Path::to_path_buf),
             };
 
             run_plan_commands(&config, &commands)?;
