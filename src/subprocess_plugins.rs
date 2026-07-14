@@ -47,12 +47,22 @@ fn options_for_plan_execution(
         .iter()
         .any(|registered| registered == namespace);
 
-    if plugin.name == "rust" && matches!(namespace, "cargo" | "rust") && owns_namespace_root {
+    if is_rust_namespace_command(plugin, command) && owns_namespace_root {
         execution_options.include_filters = None;
         execution_options.exclude_filters = None;
     }
 
     execution_options
+}
+
+/// Whether trusted Rust-plugin routing explicitly entered a Cargo namespace.
+///
+/// This uses plugin identity and the matched command rather than inspecting a
+/// returned shell plan. It also covers legacy multi-word Rust registrations so
+/// Cargo remains authoritative when older plugins are installed.
+fn is_rust_namespace_command(plugin: &PluginInfo, command: &str) -> bool {
+    let namespace = command.split_whitespace().next().unwrap_or_default();
+    plugin.name == "rust" && matches!(namespace, "cargo" | "rust")
 }
 
 impl Default for SubprocessPluginManager {
@@ -342,7 +352,8 @@ impl SubprocessPluginManager {
             Ok(response) => {
                 // Plugin returned an execution plan - execute it via loop_lib
                 let execution_options = options_for_plan_execution(&plugin.info, command, options);
-                self.execute_plan(&response.plan, &execution_options)
+                let expand_loop_aliases = !is_rust_namespace_command(&plugin.info, command);
+                self.execute_plan(&response.plan, &execution_options, expand_loop_aliases)
             }
             Err(_) => {
                 // Couldn't parse as our protocol - print output as-is (legacy behavior)
@@ -353,8 +364,20 @@ impl SubprocessPluginManager {
     }
 
     /// Execute an execution plan via loop_lib
-    fn execute_plan(&self, plan: &ExecutionPlan, options: &PluginRequestOptions) -> Result<bool> {
-        use loop_lib::{run_commands, DirCommand, LoopConfig};
+    fn execute_plan(
+        &self,
+        plan: &ExecutionPlan,
+        options: &PluginRequestOptions,
+        expand_loop_aliases: bool,
+    ) -> Result<bool> {
+        use loop_lib::{run_commands, run_commands_without_loop_aliases, DirCommand, LoopConfig};
+
+        let run_plan_commands: fn(&LoopConfig, &[DirCommand]) -> Result<()> = if expand_loop_aliases
+        {
+            run_commands
+        } else {
+            run_commands_without_loop_aliases
+        };
 
         // Phase 1: Run pre_commands sequentially (setup tasks like SSH ControlMaster)
         if !plan.pre_commands.is_empty() {
@@ -388,7 +411,7 @@ impl SubprocessPluginManager {
                 };
                 // Ignore failures for pre_commands (e.g., SSH socket already exists)
                 // The main commands will fail if setup was actually needed
-                if let Err(e) = run_commands(&pre_config, &[cmd]) {
+                if let Err(e) = run_plan_commands(&pre_config, &[cmd]) {
                     if options.verbose {
                         eprintln!("Pre-command failed (continuing): {e}");
                     }
@@ -428,7 +451,7 @@ impl SubprocessPluginManager {
                 root_dir,
             };
 
-            run_commands(&config, &commands)?;
+            run_plan_commands(&config, &commands)?;
         }
 
         // Phase 3: Run post_commands sequentially (cleanup tasks)
@@ -456,7 +479,7 @@ impl SubprocessPluginManager {
                     cmd: post_cmd.cmd.clone(),
                     env: post_cmd.env.clone(),
                 };
-                if let Err(e) = run_commands(&post_config, &[cmd]) {
+                if let Err(e) = run_plan_commands(&post_config, &[cmd]) {
                     if options.verbose {
                         eprintln!("Post-command failed: {e}");
                     }
@@ -781,6 +804,28 @@ mod tests {
         assert!(!options.silent);
         assert!(options.include_filters.is_none());
         assert!(options.exclude_filters.is_none());
+    }
+
+    #[test]
+    fn test_only_rust_namespace_commands_disable_loop_aliases() {
+        let rust = plugin_info("rust", &["cargo", "rust"]);
+        for command in ["cargo", "cargo clean", "rust", "rust test"] {
+            assert!(is_rust_namespace_command(&rust, command), "{command}");
+        }
+
+        // Legacy exact registrations still represent the same Cargo authority
+        // boundary even though they do not own a namespace root.
+        let legacy_rust = plugin_info("rust", &["cargo build", "rust test"]);
+        assert!(is_rust_namespace_command(&legacy_rust, "cargo build"));
+        assert!(is_rust_namespace_command(&legacy_rust, "rust test"));
+
+        for (plugin, command) in [
+            (plugin_info("git", &["git status"]), "git status"),
+            (plugin_info("cargo-wrapper", &["cargo"]), "cargo"),
+            (plugin_info("rust", &["build"]), "build"),
+        ] {
+            assert!(!is_rust_namespace_command(&plugin, command), "{command}");
+        }
     }
 
     #[test]

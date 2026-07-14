@@ -1291,6 +1291,94 @@ fn is_cargo_namespace(args: &[String]) -> bool {
     matches!(args.first().map(String::as_str), Some("cargo" | "rust"))
 }
 
+/// Locate Cargo's subcommand after its leading global options.
+///
+/// Cargo accepts an optional rustup `+toolchain` selector followed by global
+/// flags before the command name. This parser recognizes only that documented
+/// leading grammar and returns `None` for terminal, malformed, or unknown
+/// forms, keeping ambiguous `--recursive` tokens Cargo-owned. It never scans
+/// beyond Cargo's `--` separator.
+fn cargo_subcommand_index(args: &[String]) -> Option<usize> {
+    if !is_cargo_namespace(args) {
+        return None;
+    }
+
+    let separator = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    let mut index = 1;
+
+    if index < separator
+        && args[index]
+            .strip_prefix('+')
+            .is_some_and(|toolchain| !toolchain.is_empty())
+    {
+        index += 1;
+    }
+
+    while index < separator {
+        let argument = args[index].as_str();
+        match argument {
+            // Global modifiers that do not consume a value.
+            "--locked" | "--offline" | "--frozen" | "--verbose" | "-q" | "--quiet" => {
+                index += 1;
+            }
+            // These modes exit without dispatching a Cargo subcommand.
+            "-V" | "--version" | "--list" | "--explain" | "-h" | "--help" => {
+                return None;
+            }
+            // Global options whose value is the following token.
+            "--color" | "--config" | "-C" => {
+                if index + 1 >= separator || args[index + 1].starts_with('-') {
+                    return None;
+                }
+                index += 2;
+            }
+            "-Z" => {
+                if index + 1 >= separator
+                    || args[index + 1].starts_with('-')
+                    || args[index + 1] == "script"
+                {
+                    return None;
+                }
+                index += 2;
+            }
+            _ if argument.starts_with("--color=") || argument.starts_with("--config=") => {
+                index += 1;
+            }
+            _ if argument.starts_with("--explain=") => return None,
+            _ if argument.strip_prefix('-').is_some_and(|flags| {
+                !flags.is_empty() && flags.chars().all(|flag| flag == 'v')
+            }) =>
+            {
+                index += 1;
+            }
+            _ if argument
+                .strip_prefix("-C")
+                .is_some_and(|path| !path.is_empty()) =>
+            {
+                index += 1;
+            }
+            _ if argument
+                .strip_prefix("-Z")
+                .is_some_and(|flag| !flag.is_empty()) =>
+            {
+                if argument == "-Zscript" {
+                    return None;
+                }
+                index += 1;
+            }
+            // Unknown leading options remain Cargo-owned rather than causing
+            // Meta to search later tokens for a familiar command name.
+            _ if argument.starts_with('-') => return None,
+            _ => return Some(index),
+        }
+    }
+
+    None
+}
+
 /// Whether a help flag appears before the command's `--` separator.
 fn contains_help_before_separator(args: &[String]) -> bool {
     args.iter()
@@ -1317,26 +1405,24 @@ fn is_cargo_namespace_help(args: &[String], prefix_help: bool) -> bool {
 /// behavior for Meta-only global flags.
 fn extract_global_flags(args: &mut Vec<String>, cli: &mut Cli) {
     if is_cargo_namespace(args) {
-        let supports_recursive_compat = matches!(
-            args.get(1).map(String::as_str),
-            Some("build" | "test" | "clean")
-        );
+        let subcommand_index = cargo_subcommand_index(args);
+        let supports_recursive_compat = subcommand_index
+            .is_some_and(|index| matches!(args[index].as_str(), "build" | "test" | "clean"));
 
-        if supports_recursive_compat {
-            let mut after_separator = false;
+        if let (true, Some(subcommand_index)) = (supports_recursive_compat, subcommand_index) {
+            let separator = args
+                .iter()
+                .position(|arg| arg == "--")
+                .unwrap_or(args.len());
+            let mut index = 0;
             args.retain(|arg| {
-                if after_separator {
-                    return true;
-                }
-                if arg == "--" {
-                    after_separator = true;
-                    return true;
-                }
-                if arg == "--recursive" {
+                let remove =
+                    index > subcommand_index && index < separator && arg.as_str() == "--recursive";
+                index += 1;
+                if remove {
                     cli.recursive = true;
-                    return false;
                 }
-                true
+                !remove
             });
         }
         return;
@@ -1549,6 +1635,66 @@ mod tests {
 
             assert!(!cli.recursive, "cargo {subcommand}");
             assert_eq!(args, expected);
+        }
+    }
+
+    #[test]
+    fn test_cargo_recursive_compatibility_finds_the_actual_subcommand() {
+        for (input, expected) in [
+            (
+                &["cargo", "--locked", "clean", "--recursive"][..],
+                &["cargo", "--locked", "clean"][..],
+            ),
+            (
+                &["rust", "+nightly", "--offline", "test", "--recursive"][..],
+                &["rust", "+nightly", "--offline", "test"][..],
+            ),
+            (
+                &["cargo", "--color", "always", "build", "--recursive"][..],
+                &["cargo", "--color", "always", "build"][..],
+            ),
+            (
+                &[
+                    "cargo",
+                    "-Zunstable-options",
+                    "-C",
+                    "crate",
+                    "clean",
+                    "--recursive",
+                ][..],
+                &["cargo", "-Zunstable-options", "-C", "crate", "clean"][..],
+            ),
+        ] {
+            let mut cli = empty_cli();
+            let mut args = strings(input);
+
+            extract_global_flags(&mut args, &mut cli);
+
+            assert!(cli.recursive, "{input:?}");
+            assert_eq!(args, strings(expected), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn test_cargo_subcommand_detection_is_conservative() {
+        for input in [
+            &["cargo", "--config", "clean", "update", "--recursive"][..],
+            &["cargo", "--config", "--locked", "clean", "--recursive"][..],
+            &["cargo", "--color", "--locked", "clean", "--recursive"][..],
+            &["cargo", "-C", "--locked", "clean", "--recursive"][..],
+            &["cargo", "-Z", "--locked", "clean", "--recursive"][..],
+            &["cargo", "--locked", "--", "clean", "--recursive"][..],
+            &["cargo", "--recursive", "clean"][..],
+            &["cargo", "-Zscript", "clean", "--recursive"][..],
+        ] {
+            let mut cli = empty_cli();
+            let mut args = strings(input);
+            let expected = args.clone();
+
+            extract_global_flags(&mut args, &mut cli);
+
+            assert!(!cli.recursive, "{input:?}");
+            assert_eq!(args, expected, "{input:?}");
         }
     }
 
