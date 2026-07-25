@@ -13,7 +13,7 @@ description = "Multi-repo management CLI with AI integration"
 [dependencies]
 meta_core = { path = "../meta_core" }
 meta_plugin_protocol = { path = "../meta_plugin_protocol" }
-thiserror = "1.0"
+thiserror = "2.0"
 anyhow = "1.0"
 clap = { version = "4.3", features = ["derive"] }
 colored = "2.0"
