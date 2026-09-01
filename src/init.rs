@@ -153,7 +153,11 @@ fn install_claude_integration_to(
         remove_legacy_skill(&skills_dir.join(format!("{skill_name}.md")), verbose)?;
 
         let harness_skill_path = skills_dir.join(skill_name);
-        let relative_owner_path = Path::new("../../.agents/skills").join(skill_name);
+        let relative_owner_path = Path::new("..")
+            .join("..")
+            .join(".agents")
+            .join("skills")
+            .join(skill_name);
         if install_harness_skill(
             &owner_dir,
             &harness_skill_path,
@@ -671,8 +675,12 @@ mod tests {
             owner_skill.display()
         );
         assert_eq!(fs::read_to_string(&owner_skill).unwrap(), expected_content);
+        let mut frontmatter = expected_content.lines();
+        let expected_name = format!("name: {skill_name}");
         assert!(
-            expected_content.starts_with(&format!("---\nname: {skill_name}\ndescription:")),
+            frontmatter.next() == Some("---")
+                && frontmatter.next() == Some(expected_name.as_str())
+                && matches!(frontmatter.next(), Some(description) if description.starts_with("description:")),
             "{skill_name} should include trigger frontmatter"
         );
 
@@ -681,7 +689,11 @@ mod tests {
         if metadata.file_type().is_symlink() {
             assert_eq!(
                 fs::read_link(&harness_skill).unwrap(),
-                Path::new("../../.agents/skills").join(skill_name)
+                Path::new("..")
+                    .join("..")
+                    .join(".agents")
+                    .join("skills")
+                    .join(skill_name)
             );
             assert_eq!(
                 fs::canonicalize(&harness_skill).unwrap(),
