@@ -1,3 +1,8 @@
+---
+name: meta-git
+description: "Coordinate Git operations across a meta workspace. Use when cloning, updating, inspecting, committing, or otherwise operating on multiple repositories."
+---
+
 # Meta Git Skill
 
 Git operations across multiple repositories. One command operates on ALL repos in the workspace.

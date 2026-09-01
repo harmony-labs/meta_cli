@@ -8,15 +8,16 @@ use anyhow::{Context, Result};
 use colored::*;
 use serde_json::{json, Map, Value};
 use std::fs;
+use std::io;
 use std::path::Path;
 
 /// Embedded skill files from the meta repository
-const SKILL_META_WORKSPACE: &str = include_str!("../.claude/skills/meta-workspace.md");
-const SKILL_META_GIT: &str = include_str!("../.claude/skills/meta-git.md");
-const SKILL_META_EXEC: &str = include_str!("../.claude/skills/meta-exec.md");
-const SKILL_META_PLUGINS: &str = include_str!("../.claude/skills/meta-plugins.md");
-const SKILL_META_WORKTREE: &str = include_str!("../.claude/skills/meta-worktree.md");
-const SKILL_META_SAFETY: &str = include_str!("../.claude/skills/meta-safety.md");
+const SKILL_META_WORKSPACE: &str = include_str!("../.claude/skills/meta-workspace/SKILL.md");
+const SKILL_META_GIT: &str = include_str!("../.claude/skills/meta-git/SKILL.md");
+const SKILL_META_EXEC: &str = include_str!("../.claude/skills/meta-exec/SKILL.md");
+const SKILL_META_PLUGINS: &str = include_str!("../.claude/skills/meta-plugins/SKILL.md");
+const SKILL_META_WORKTREE: &str = include_str!("../.claude/skills/meta-worktree/SKILL.md");
+const SKILL_META_SAFETY: &str = include_str!("../.claude/skills/meta-safety/SKILL.md");
 
 /// Embedded rule files (always-loaded, survive compaction)
 const RULE_WORKSPACE_DISCIPLINE: &str =
@@ -24,14 +25,14 @@ const RULE_WORKSPACE_DISCIPLINE: &str =
 const RULE_DESTRUCTIVE_COMMANDS: &str =
     include_str!("../.claude/rules/meta-destructive-commands.md");
 
-/// All available skills with their filenames
+/// All available skills with their directory names
 const SKILLS: &[(&str, &str)] = &[
-    ("meta-workspace.md", SKILL_META_WORKSPACE),
-    ("meta-git.md", SKILL_META_GIT),
-    ("meta-exec.md", SKILL_META_EXEC),
-    ("meta-plugins.md", SKILL_META_PLUGINS),
-    ("meta-worktree.md", SKILL_META_WORKTREE),
-    ("meta-safety.md", SKILL_META_SAFETY),
+    ("meta-workspace", SKILL_META_WORKSPACE),
+    ("meta-git", SKILL_META_GIT),
+    ("meta-exec", SKILL_META_EXEC),
+    ("meta-plugins", SKILL_META_PLUGINS),
+    ("meta-worktree", SKILL_META_WORKTREE),
+    ("meta-safety", SKILL_META_SAFETY),
 ];
 
 /// All available rules with their filenames
@@ -129,22 +130,40 @@ fn install_claude_integration_to(
     let mut skipped = 0;
     let mut merged = false;
 
-    // Install skill files
-    // --force or --update: overwrite; default: skip existing
+    // Install skill files into the owner directory, then project them into Claude.
+    // --force or --update: refresh changed content; default: skip existing content.
     let overwrite_content = force || update;
-    for (filename, content) in SKILLS {
-        let target_path = skills_dir.join(filename);
-
-        if target_path.exists() && !overwrite_content {
+    for &(skill_name, content) in SKILLS {
+        let owner_dir = target_dir.join(".agents").join("skills").join(skill_name);
+        if !owner_dir.exists() {
+            fs::create_dir_all(&owner_dir)
+                .with_context(|| format!("Failed to create {}", owner_dir.display()))?;
             if verbose {
-                println!("{} {} (already exists)", "Skipped".yellow(), filename);
+                println!("Created {}", owner_dir.display());
             }
-            skipped += 1;
-            continue;
         }
 
-        write_file(&target_path, content, verbose)?;
-        installed += 1;
+        let owner_skill_path = owner_dir.join("SKILL.md");
+        if install_skill_file(&owner_skill_path, content, overwrite_content, verbose)? {
+            installed += 1;
+        } else {
+            skipped += 1;
+        }
+
+        remove_legacy_skill(&skills_dir.join(format!("{skill_name}.md")), verbose)?;
+
+        let harness_skill_path = skills_dir.join(skill_name);
+        let relative_owner_path = Path::new("../../.agents/skills").join(skill_name);
+        if install_harness_skill(
+            &owner_dir,
+            &harness_skill_path,
+            &relative_owner_path,
+            content,
+            overwrite_content,
+            verbose,
+        )? {
+            installed += 1;
+        }
     }
 
     // Install rule files
@@ -467,6 +486,158 @@ fn register_marketplace(verbose: bool) {
     }
 }
 
+/// Write a skill file when it is new or its content needs refreshing.
+fn install_skill_file(
+    path: &Path,
+    content: &str,
+    overwrite_content: bool,
+    verbose: bool,
+) -> Result<bool> {
+    if path.exists() {
+        if !overwrite_content {
+            if verbose {
+                println!("{} {} (already exists)", "Skipped".yellow(), path.display());
+            }
+            return Ok(false);
+        }
+
+        let existing = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        if existing == content {
+            if verbose {
+                println!(
+                    "{} {} (already up to date)",
+                    "Skipped".yellow(),
+                    path.display()
+                );
+            }
+            return Ok(false);
+        }
+    }
+
+    write_file(path, content, verbose)?;
+    Ok(true)
+}
+
+/// Remove the flat skill file layout previously owned by meta.
+fn remove_legacy_skill(path: &Path, verbose: bool) -> Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("Failed to inspect {}", path.display()))
+        }
+    };
+
+    if !metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+
+    fs::remove_file(path).with_context(|| format!("Failed to remove {}", path.display()))?;
+    if verbose {
+        println!("Removed legacy {}", path.display());
+    }
+
+    Ok(())
+}
+
+/// Project an owner skill into Claude's native skills directory.
+///
+/// A directory symlink keeps the harness projection in sync with the canonical
+/// `.agents/skills` copy. Platforms that cannot create the link receive the
+/// same folder layout directly in the harness directory instead.
+fn install_harness_skill(
+    owner_dir: &Path,
+    harness_path: &Path,
+    relative_owner_path: &Path,
+    content: &str,
+    overwrite_content: bool,
+    verbose: bool,
+) -> Result<bool> {
+    match fs::symlink_metadata(harness_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            if symlink_resolves_to(harness_path, owner_dir) {
+                return Ok(false);
+            }
+
+            fs::remove_file(harness_path)
+                .with_context(|| format!("Failed to replace {}", harness_path.display()))?;
+        }
+        Ok(metadata) if metadata.is_dir() => {
+            return install_skill_file(
+                &harness_path.join("SKILL.md"),
+                content,
+                overwrite_content,
+                verbose,
+            );
+        }
+        Ok(_) => {
+            fs::remove_file(harness_path)
+                .with_context(|| format!("Failed to replace {}", harness_path.display()))?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("Failed to inspect {}", harness_path.display()))
+        }
+    }
+
+    match create_directory_symlink(relative_owner_path, harness_path) {
+        Ok(()) => {
+            if verbose {
+                println!(
+                    "Linked {} -> {}",
+                    harness_path.display(),
+                    relative_owner_path.display()
+                );
+            }
+            Ok(false)
+        }
+        Err(error) => {
+            if verbose {
+                println!(
+                    "Could not link {} ({}); installing a folder instead",
+                    harness_path.display(),
+                    error
+                );
+            }
+            fs::create_dir_all(harness_path)
+                .with_context(|| format!("Failed to create {}", harness_path.display()))?;
+            install_skill_file(
+                &harness_path.join("SKILL.md"),
+                content,
+                overwrite_content,
+                verbose,
+            )
+        }
+    }
+}
+
+fn symlink_resolves_to(path: &Path, owner_dir: &Path) -> bool {
+    match (fs::canonicalize(path), fs::canonicalize(owner_dir)) {
+        (Ok(target), Ok(owner)) => target == owner,
+        _ => false,
+    }
+}
+
+#[cfg(unix)]
+fn create_directory_symlink(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_directory_symlink(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_directory_symlink(_target: &Path, _link: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "directory symlinks are not supported on this platform",
+    ))
+}
+
 fn write_file(path: &Path, content: &str, verbose: bool) -> Result<()> {
     fs::write(path, content).with_context(|| format!("Failed to write {}", path.display()))?;
 
@@ -486,7 +657,48 @@ fn write_file(path: &Path, content: &str, verbose: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Path;
     use tempfile::tempdir;
+
+    fn assert_skill_layout(target_dir: &Path, skill_name: &str, expected_content: &str) {
+        let owner_dir = target_dir.join(".agents").join("skills").join(skill_name);
+        let owner_skill = owner_dir.join("SKILL.md");
+        assert!(
+            owner_skill.is_file(),
+            "{} should exist",
+            owner_skill.display()
+        );
+        assert_eq!(fs::read_to_string(&owner_skill).unwrap(), expected_content);
+        assert!(
+            expected_content.starts_with(&format!("---\nname: {skill_name}\ndescription:")),
+            "{skill_name} should include trigger frontmatter"
+        );
+
+        let harness_skill = target_dir.join(".claude").join("skills").join(skill_name);
+        let metadata = fs::symlink_metadata(&harness_skill).unwrap();
+        if metadata.file_type().is_symlink() {
+            assert_eq!(
+                fs::read_link(&harness_skill).unwrap(),
+                Path::new("../../.agents/skills").join(skill_name)
+            );
+            assert_eq!(
+                fs::canonicalize(&harness_skill).unwrap(),
+                fs::canonicalize(&owner_dir).unwrap()
+            );
+        } else {
+            assert!(
+                metadata.is_dir(),
+                "{} should be a directory",
+                harness_skill.display()
+            );
+            assert_eq!(
+                fs::read_to_string(harness_skill.join("SKILL.md")).unwrap(),
+                expected_content
+            );
+        }
+    }
 
     #[test]
     fn test_install_creates_skills_rules_and_settings() {
@@ -501,14 +713,22 @@ mod tests {
         let skills_dir = claude_dir.join("skills");
         let rules_dir = claude_dir.join("rules");
 
-        // Skills should exist
+        // Canonical skill folders and Claude projections should exist.
         assert!(skills_dir.exists());
-        assert!(skills_dir.join("meta-workspace.md").exists());
-        assert!(skills_dir.join("meta-git.md").exists());
-        assert!(skills_dir.join("meta-exec.md").exists());
-        assert!(skills_dir.join("meta-plugins.md").exists());
-        assert!(skills_dir.join("meta-worktree.md").exists());
-        assert!(skills_dir.join("meta-safety.md").exists());
+        for &(skill_name, content) in SKILLS {
+            assert_skill_layout(dir.path(), skill_name, content);
+        }
+
+        #[cfg(unix)]
+        for &(skill_name, _) in SKILLS {
+            assert!(
+                fs::symlink_metadata(skills_dir.join(skill_name))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "{skill_name} should be a symlink on Unix"
+            );
+        }
 
         // Rules should exist
         assert!(rules_dir.exists());
@@ -528,17 +748,23 @@ mod tests {
     }
 
     #[test]
-    fn test_install_skips_existing_files() {
+    fn test_install_skips_existing_skill_files() {
         let dir = tempdir().unwrap();
 
         let claude_dir = dir.path().join(".claude");
         let skills_dir = claude_dir.join("skills");
         let rules_dir = claude_dir.join("rules");
+        let owner_dir = dir
+            .path()
+            .join(".agents")
+            .join("skills")
+            .join("meta-workspace");
         fs::create_dir_all(&skills_dir).unwrap();
         fs::create_dir_all(&rules_dir).unwrap();
+        fs::create_dir_all(&owner_dir).unwrap();
 
-        // Create existing skill file
-        let existing_skill = skills_dir.join("meta-workspace.md");
+        // Create existing canonical skill file.
+        let existing_skill = owner_dir.join("SKILL.md");
         fs::write(&existing_skill, "custom content").unwrap();
 
         // Create existing rule file
@@ -551,9 +777,13 @@ mod tests {
 
         install_claude_integration_to(dir.path(), false, false, false).unwrap();
 
-        // Should not overwrite skill or rule
+        // Should not overwrite canonical skill or rule.
         let skill_content = fs::read_to_string(&existing_skill).unwrap();
         assert_eq!(skill_content, "custom content");
+        assert_eq!(
+            fs::read_to_string(skills_dir.join("meta-workspace").join("SKILL.md")).unwrap(),
+            "custom content"
+        );
 
         let rule_content = fs::read_to_string(&existing_rule).unwrap();
         assert_eq!(rule_content, "custom rule");
@@ -575,11 +805,17 @@ mod tests {
         let claude_dir = dir.path().join(".claude");
         let skills_dir = claude_dir.join("skills");
         let rules_dir = claude_dir.join("rules");
+        let owner_dir = dir
+            .path()
+            .join(".agents")
+            .join("skills")
+            .join("meta-workspace");
         fs::create_dir_all(&skills_dir).unwrap();
         fs::create_dir_all(&rules_dir).unwrap();
+        fs::create_dir_all(&owner_dir).unwrap();
 
         // Create existing files with different content
-        let existing_skill = skills_dir.join("meta-workspace.md");
+        let existing_skill = owner_dir.join("SKILL.md");
         fs::write(&existing_skill, "custom content").unwrap();
 
         let existing_rule = rules_dir.join("meta-workspace-discipline.md");
@@ -593,6 +829,7 @@ mod tests {
         // Should overwrite with embedded content
         let skill_content = fs::read_to_string(&existing_skill).unwrap();
         assert!(skill_content.contains("Meta Workspace Skill"));
+        assert_skill_layout(dir.path(), "meta-workspace", SKILL_META_WORKSPACE);
 
         let rule_content = fs::read_to_string(&existing_rule).unwrap();
         assert!(rule_content.contains("Meta Workspace Discipline"));
@@ -617,9 +854,9 @@ mod tests {
         fs::create_dir_all(&skills_dir).unwrap();
         fs::create_dir_all(&rules_dir).unwrap();
 
-        // Create existing files
-        let existing_skill = skills_dir.join("meta-workspace.md");
-        fs::write(&existing_skill, "old skill content").unwrap();
+        // Create a legacy skill file and existing rule.
+        let legacy_skill = skills_dir.join("meta-workspace.md");
+        fs::write(&legacy_skill, "old skill content").unwrap();
 
         let existing_rule = rules_dir.join("meta-workspace-discipline.md");
         fs::write(&existing_rule, "old rule content").unwrap();
@@ -635,11 +872,20 @@ mod tests {
         install_claude_integration_to(dir.path(), false, true, false).unwrap();
 
         // Skills and rules should be updated
-        let skill_content = fs::read_to_string(&existing_skill).unwrap();
+        let skill_content = fs::read_to_string(
+            dir.path()
+                .join(".agents")
+                .join("skills")
+                .join("meta-workspace")
+                .join("SKILL.md"),
+        )
+        .unwrap();
         assert!(
             skill_content.contains("Meta Workspace Skill"),
             "skill should be updated"
         );
+        assert!(!legacy_skill.exists(), "legacy skill should be removed");
+        assert_skill_layout(dir.path(), "meta-workspace", SKILL_META_WORKSPACE);
 
         let rule_content = fs::read_to_string(&existing_rule).unwrap();
         assert!(
@@ -657,6 +903,63 @@ mod tests {
             !settings_content.contains("SessionStart"),
             "meta hooks should NOT be added"
         );
+    }
+
+    #[test]
+    fn test_legacy_skill_migration_is_idempotent_for_all_modes() {
+        for (force, update) in [(false, false), (true, false), (false, true), (true, true)] {
+            let dir = tempdir().unwrap();
+            let skills_dir = dir.path().join(".claude").join("skills");
+            fs::create_dir_all(&skills_dir).unwrap();
+
+            for &(skill_name, _) in SKILLS {
+                fs::write(
+                    skills_dir.join(format!("{skill_name}.md")),
+                    "legacy skill content",
+                )
+                .unwrap();
+            }
+            let unrelated_skill = skills_dir.join("custom-skill.md");
+            fs::write(&unrelated_skill, "leave me alone").unwrap();
+
+            install_claude_integration_to(dir.path(), force, update, false).unwrap();
+
+            for &(skill_name, content) in SKILLS {
+                assert!(
+                    !skills_dir.join(format!("{skill_name}.md")).exists(),
+                    "{skill_name} legacy file should be removed"
+                );
+                assert_skill_layout(dir.path(), skill_name, content);
+            }
+            assert_eq!(
+                fs::read_to_string(&unrelated_skill).unwrap(),
+                "leave me alone"
+            );
+
+            #[cfg(unix)]
+            let workspace_link_inode = fs::symlink_metadata(skills_dir.join("meta-workspace"))
+                .unwrap()
+                .ino();
+
+            install_claude_integration_to(dir.path(), force, update, false).unwrap();
+
+            for &(skill_name, content) in SKILLS {
+                assert_skill_layout(dir.path(), skill_name, content);
+            }
+            assert_eq!(
+                fs::read_to_string(&unrelated_skill).unwrap(),
+                "leave me alone"
+            );
+
+            #[cfg(unix)]
+            assert_eq!(
+                fs::symlink_metadata(skills_dir.join("meta-workspace"))
+                    .unwrap()
+                    .ino(),
+                workspace_link_inode,
+                "an already-correct skill symlink should be left in place"
+            );
+        }
     }
 
     #[test]

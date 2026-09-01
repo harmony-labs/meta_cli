@@ -1,3 +1,8 @@
+---
+name: meta-safety
+description: "Operate a multi-repository workspace precisely and safely. Use when scoping commands or assessing dependencies before changing shared code."
+---
+
 # Meta Safety Skill
 
 Multi-repo workspaces are powerful but require awareness. Meta gives you precision tools to operate on exactly what you need, saving turns and avoiding unintended changes.

@@ -1,3 +1,8 @@
+---
+name: meta-workspace
+description: "Work in a meta repository by discovering its child repositories, workspace structure, and cross-repo state."
+---
+
 # Meta Workspace Skill
 
 This project is a **meta repository** - a parent repo that manages a graph of child repositories. Understanding this structure is essential for effective operation.

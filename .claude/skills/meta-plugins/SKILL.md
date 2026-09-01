@@ -1,3 +1,8 @@
+---
+name: meta-plugins
+description: "Understand and manage Meta command plugins. Use when a meta command is intercepted or when inspecting plugin behavior."
+---
+
 # Meta Plugins Skill
 
 Meta uses a plugin system to intercept commands and provide enhanced behavior.
